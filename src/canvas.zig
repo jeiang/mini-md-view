@@ -183,7 +183,7 @@ fn scene_draw(context: Context, drawn: *const scene.Scene) void {
         .line => |c| {
             const points = drawn.points_slice(c.points);
             if (points.len < 2) continue;
-            line_draw(context, points, c.smooth, c.head_start, c.head_end);
+            line_draw(context, points, c.smooth, c.head_start, c.head_end, c.stroke_width);
             path_paint(context, .{
                 .stroke = c.stroke,
                 .stroke_width = c.stroke_width,
@@ -262,6 +262,12 @@ fn point_toward(point: scene.Point, toward: scene.Point, distance: f32) scene.Po
     return .{ .x = point.x + delta_x * fraction, .y = point.y + delta_y * fraction };
 }
 
+/// Heads grow with the line, so that the head of a thick line does not look undersized.
+fn head_scale(stroke_width: f32) f32 {
+    assert(stroke_width >= 0);
+    return @max(1, 0.6 + 0.4 * stroke_width);
+}
+
 /// Adds the line to the current path. A smooth line is a Catmull-Rom spline through the points,
 /// converted to cubic Bezier segments.
 fn line_draw(
@@ -270,11 +276,13 @@ fn line_draw(
     smooth: bool,
     head_start: scene.Head,
     head_end: scene.Head,
+    stroke_width: f32,
 ) void {
     assert(points.len >= 2);
     const last = points.len - 1;
-    const first_point = point_toward(points[0], points[1], head_inset(head_start));
-    const last_point = point_toward(points[last], points[last - 1], head_inset(head_end));
+    const scale = head_scale(stroke_width);
+    const first_point = point_toward(points[0], points[1], head_inset(head_start) * scale);
+    const last_point = point_toward(points[last], points[last - 1], head_inset(head_end) * scale);
     cocoa.CGContextMoveToPoint(context, first_point.x, first_point.y);
     for (1..points.len) |index| {
         const to = if (index == last) last_point else points[index];
@@ -312,7 +320,9 @@ fn head_draw(
     const length = @sqrt(delta_x * delta_x + delta_y * delta_y);
     if (length < 0.001) return;
     // `along` points from the tip back along the line, and `across` is perpendicular to it.
-    const along: cocoa.Point = .{ .x = -delta_x / length, .y = -delta_y / length };
+    // Both have the length of the head's scale, so the shapes below are in unscaled points.
+    const scale: f64 = head_scale(stroke_width);
+    const along: cocoa.Point = .{ .x = -delta_x / length * scale, .y = -delta_y / length * scale };
     const across: cocoa.Point = .{ .x = -along.y, .y = along.x };
     const hollow: Paint = .{ .fill = .none, .stroke = color, .stroke_width = stroke_width };
     const solid: Paint = .{ .fill = color, .stroke = color, .stroke_width = stroke_width };
@@ -335,7 +345,13 @@ fn head_draw(
         .circle, .circle_filled => {
             const center_x = tip.x + along.x * 4;
             const center_y = tip.y + along.y * 4;
-            const circle_rect = cocoa.Rect.init(center_x - 4, center_y - 4, 8, 8);
+            const radius = 4 * scale;
+            const circle_rect = cocoa.Rect.init(
+                center_x - radius,
+                center_y - radius,
+                2 * radius,
+                2 * radius,
+            );
             cocoa.CGContextAddEllipseInRect(context, circle_rect);
             path_paint(context, if (head == .circle) hollow else solid);
         },
