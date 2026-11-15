@@ -29,9 +29,11 @@ comptime {
 pub const Align = enum(u8) { default, left, center, right };
 pub const Task = enum(u8) { none, unchecked, checked };
 pub const List = struct { ordered: bool, start: u32, tight: bool };
+/// The kind of a GFM alert, a block quote that starts with a marker such as `[!NOTE]`.
+pub const Alert = enum(u8) { none, note, tip, important, warning, caution };
 
 pub const Event = union(enum) {
-    blockquote_start,
+    blockquote_start: Alert,
     blockquote_end,
     list_start: List,
     list_end,
@@ -134,8 +136,9 @@ const Parser = struct {
     leaf: Leaf = .none,
     /// A blank line was seen inside a list. The next block decides whether that list is loose.
     blank_pending: bool = false,
-    /// The event count at that blank line. Lists that were opened later are not affected.
     blank_event_count: u32 = 0,
+    /// The innermost container that the current line opened is a block quote.
+    quote_opened: bool = false,
 
     fn event_add(parser: *Parser, event: Event) void {
         assert(parser.event_count < events_max);
@@ -238,6 +241,7 @@ const Parser = struct {
     fn containers_open(parser: *Parser, line: []const u8) []const u8 {
         var rest = line;
         var iterations: u32 = 0;
+        parser.quote_opened = false;
         while (iterations < depth_max) : (iterations += 1) {
             if (parser.container_count + 2 > depth_max) break;
             const indent = indent_of(rest);
@@ -247,7 +251,8 @@ const Parser = struct {
                 parser.leaf_close();
                 parser.list_dangling_close();
                 parser.container_push(.blockquote);
-                parser.event_add(.blockquote_start);
+                parser.event_add(.{ .blockquote_start = .none });
+                parser.quote_opened = true;
                 rest = content[1..];
                 if (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
                 continue;
@@ -261,6 +266,7 @@ const Parser = struct {
             }
             parser.leaf_close();
             parser.item_open(marker, indent.columns);
+            parser.quote_opened = false;
             rest = content[marker.content_offset..];
         }
         return rest;
@@ -336,6 +342,14 @@ const Parser = struct {
         const rest = parser.containers_open(match.rest);
         parser.list_dangling_close();
         parser.looseness_update();
+        if (parser.quote_opened) {
+            if (alert_match(rest)) |alert| {
+                // The marker line is not shown: it only sets the kind of the quote.
+                assert(parser.storage.events[parser.event_count - 1] == .blockquote_start);
+                parser.storage.events[parser.event_count - 1] = .{ .blockquote_start = alert };
+                return;
+            }
+        }
         parser.leaf_process(rest);
     }
 
@@ -755,6 +769,18 @@ fn list_marker_match(line: []const u8) ?Marker {
     }
     assert(marker.content_offset <= line.len);
     return marker;
+}
+
+/// Matches the first line of a GFM alert, such as `[!NOTE]`, in any letter case.
+fn alert_match(line: []const u8) ?Alert {
+    const content = std.mem.trimEnd(u8, line, " ");
+    if (content.len < 4 or content[0] != '[' or content[1] != '!') return null;
+    if (content[content.len - 1] != ']') return null;
+    const name = content[2 .. content.len - 1];
+    for (std.enums.values(Alert)[1..]) |alert| {
+        if (std.ascii.eqlIgnoreCase(name, @tagName(alert))) return alert;
+    }
+    return null;
 }
 
 /// Whether the line starts a block that ends the open paragraph or table. When the block would

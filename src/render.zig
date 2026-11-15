@@ -83,7 +83,7 @@ pub const Options = struct {
 };
 
 const Frame = union(enum) {
-    quote: Id,
+    quote: struct { block: Id, alert: markdown.Alert },
     list: struct { ordered: bool, number: u32, tight: bool, item_count: u32 },
     item,
     cell: Id,
@@ -196,10 +196,17 @@ const Builder = struct {
         return created;
     }
 
-    fn quote_depth(builder: *const Builder) u32 {
-        var depth: u32 = 0;
-        for (builder.frames[0..builder.frame_count]) |frame| depth += @intFromBool(frame == .quote);
-        return depth;
+    /// Text in a quote is muted, but text in an alert is not.
+    fn quote_muted(builder: *const Builder) bool {
+        var index = builder.frame_count;
+        while (index > 0) {
+            index -= 1;
+            switch (builder.frames[index]) {
+                .quote => |quote| return quote.alert == .none,
+                .list, .item, .cell => {},
+            }
+        }
+        return false;
     }
 
     fn style_current(builder: *const Builder) FontStyle {
@@ -214,7 +221,7 @@ const Builder = struct {
     /// The attributes for a run of text in the current inline state.
     fn attributes(builder: *Builder, style: FontStyle) Id {
         const result = objc.new("NSMutableDictionary");
-        const muted = builder.heading_level == 6 or builder.quote_depth() > 0;
+        const muted = builder.heading_level == 6 or builder.quote_muted();
         const color = if (muted) cocoa.color("secondaryLabelColor") else cocoa.color("labelColor");
         dictionary_set(result, cocoa.NSFontAttributeName, builder.font(style));
         dictionary_set(result, cocoa.NSForegroundColorAttributeName, color);
@@ -320,7 +327,8 @@ const Builder = struct {
     fn blocks(builder: *Builder, extra: ?Id) Id {
         const result = objc.new("NSMutableArray");
         for (builder.frames[0..builder.frame_count]) |frame| switch (frame) {
-            .quote, .cell => |block| objc.send(void, result, "addObject:", .{block}),
+            .quote => |quote| objc.send(void, result, "addObject:", .{quote.block}),
+            .cell => |block| objc.send(void, result, "addObject:", .{block}),
             .list, .item => {},
         };
         if (extra) |block| objc.send(void, result, "addObject:", .{block});
@@ -547,7 +555,10 @@ fn quote_block_draw(
     const bar_width: f64 = 3.5;
     const bar = cocoa.Rect.init(frame.origin.x, frame.origin.y, bar_width, frame.size.height);
     cocoa.path_add_rounded(context, bar, bar_width / 2);
-    objc.send(void, cocoa.color("controlAccentColor"), "setFill", .{});
+    // This method replaces the background drawing, so an alert keeps its bar color there.
+    const color = objc.send(?Id, block, "backgroundColor", .{}) orelse
+        cocoa.color("controlAccentColor");
+    objc.send(void, color, "setFill", .{});
     cocoa.CGContextFillPath(context);
 }
 
@@ -611,7 +622,7 @@ fn block_layer_set(block: Id, layer: cocoa.BlockLayer, width: f64) void {
 
 fn event_apply(builder: *Builder, event: markdown.Event) void {
     switch (event) {
-        .blockquote_start => quote_begin(builder),
+        .blockquote_start => |alert| quote_begin(builder, alert),
         .blockquote_end, .list_end => container_end(builder),
         .list_start => |list| {
             builder.marker_flush();
@@ -665,15 +676,40 @@ fn container_end(builder: *Builder) void {
     builder.block_first = false;
 }
 
-fn quote_begin(builder: *Builder) void {
+fn quote_begin(builder: *Builder, alert: markdown.Alert) void {
     builder.marker_flush();
     const block = text_block_new(&quote_block_class, "MiniMdViewQuoteBlock", &quote_block_draw);
     block_fill_width(block);
     block_edge_set(block, .margin, .y_min, builder.gap());
     block_edge_set(block, .margin, .x_min, builder.indent());
     block_edge_set(block, .padding, .x_min, builder.scaled(16));
-    builder.frame_push(.{ .quote = block });
+    builder.frame_push(.{ .quote = .{ .block = block, .alert = alert } });
     builder.block_first = true;
+    if (alert == .none) return;
+
+    const color = switch (alert) {
+        .none => unreachable,
+        .note => cocoa.color("systemBlueColor"),
+        .tip => cocoa.color("systemGreenColor"),
+        .important => cocoa.color("systemPurpleColor"),
+        .warning => cocoa.color("systemOrangeColor"),
+        .caution => cocoa.color("systemRedColor"),
+    };
+    objc.send(void, block, "setBackgroundColor:", .{color});
+    const title = switch (alert) {
+        .none => unreachable,
+        .note => "Note",
+        .tip => "Tip",
+        .important => "Important",
+        .warning => "Warning",
+        .caution => "Caution",
+    };
+    const title_attributes = builder.attributes(.{ .bold = true });
+    dictionary_set(title_attributes, cocoa.NSForegroundColorAttributeName, color);
+    builder.paragraph_start = builder.length();
+    builder.append(title, title_attributes);
+    builder.paragraph_end(.{ .before = builder.gap(), .font_style = .{ .bold = true } });
+    builder.gap_small_next = true;
 }
 
 fn item_begin(builder: *Builder, task: markdown.Task) void {

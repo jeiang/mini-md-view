@@ -23,7 +23,10 @@ const Output = struct {
 fn print(events: []const markdown.Event) []const u8 {
     var output: Output = .{};
     for (events) |event| switch (event) {
-        .blockquote_start => output.add("<quote>", .{}),
+        .blockquote_start => |alert| switch (alert) {
+            .none => output.add("<quote>", .{}),
+            else => output.add("<quote {s}>", .{@tagName(alert)}),
+        },
         .blockquote_end => output.add("</quote>", .{}),
         .list_start => |list| output.add("<{s}{s}{d}>", .{
             if (list.ordered) "ol" else "ul",
@@ -144,6 +147,21 @@ test "markdown: tables" {
         "<table 2><tr head><td default>a</td><td default>b</td></tr></table>",
     );
     try expect("a | b\n---", "<h2>a | b</h>");
+}
+
+test "markdown: alerts" {
+    try expect("> [!NOTE]\n> Body *x*.", "<quote note><p>Body <em>x</em>.</p></quote>");
+    try expect("> [!tip]  \n> a", "<quote tip><p>a</p></quote>");
+    try expect("> [!Important]\n>\n> a", "<quote important><p>a</p></quote>");
+    try expect("> [!WARNING]\n> - a", "<quote warning><ul1><li><p>a</p></li></list></quote>");
+    try expect("> [!CAUTION]", "<quote caution></quote>");
+    try expect("> [!x]\n> a", "<quote><p>[!x]<soft>a</p></quote>");
+    try expect("> [!NOTE] a", "<quote><p>[!NOTE] a</p></quote>");
+    try expect("> a\n> [!NOTE]", "<quote><p>a<soft>[!NOTE]</p></quote>");
+    try expect("- > [!TIP]\n  > a", "<ul1><li><quote tip><p>a</p></quote></li></list>");
+    try expect("> > [!NOTE]\n> > a", "<quote><quote note><p>a</p></quote></quote>");
+    try expect("    > [!NOTE]", "<pre >> [!NOTE]|</pre>");
+    try expect("`> [!NOTE]`", "<p><code>> [!NOTE]</code></p>");
 }
 
 test "markdown: front matter" {
