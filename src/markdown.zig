@@ -561,14 +561,46 @@ const Parser = struct {
             }
         }
     }
+
+    /// Emits YAML front matter as a code block. Returns the size of the front matter in bytes.
+    fn front_matter_add(parser: *Parser, source: []const u8) usize {
+        assert(parser.event_count == 0);
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        const first = lines.first();
+        if (!std.mem.eql(u8, std.mem.trimEnd(u8, first, "\r"), "---")) return 0;
+        const body_start = lines.index orelse return 0;
+        // Without a closing line there is no front matter.
+        const body_end = while (lines.next()) |line| {
+            const content = std.mem.trimEnd(u8, line, "\r");
+            if (std.mem.eql(u8, content, "---") or std.mem.eql(u8, content, "...")) {
+                break @intFromPtr(line.ptr) - @intFromPtr(source.ptr);
+            }
+        } else return 0;
+        const end = lines.index orelse source.len;
+        assert(body_start <= body_end);
+        assert(body_end < end);
+
+        parser.event_add(.{ .code_block_start = "yaml" });
+        var body = std.mem.splitScalar(u8, source[body_start..body_end], '\n');
+        while (body.next()) |line| {
+            if (body.index == null and line.len == 0) break;
+            if (parser.events_free() < 4 * events_reserve) {
+                parser.truncated = true;
+                break;
+            }
+            parser.event_add(.{ .code_line = std.mem.trimEnd(u8, line, "\r") });
+        }
+        parser.event_add(.code_block_end);
+        return end;
+    }
 };
 
 pub fn parse(storage: *Storage, source: []const u8) Result {
     assert(source.len <= source_size_max);
     var parser: Parser = .{ .storage = storage };
-    parser.definitions_collect(source);
+    var line_start = parser.front_matter_add(source);
+    parser.definitions_collect(source[line_start..]);
 
-    var line_start: usize = 0;
     while (line_start < source.len) {
         if (parser.events_free() < 4 * events_reserve) {
             parser.truncated = true;

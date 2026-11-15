@@ -146,6 +146,17 @@ test "markdown: tables" {
     try expect("a | b\n---", "<h2>a | b</h>");
 }
 
+test "markdown: front matter" {
+    try expect("---\ntitle: A\ntags: [x]\n---\n# T", "<pre yaml>title: A|tags: [x]|</pre><h1>T</h>");
+    try expect("---\r\na: 1\r\n...\r\nb", "<pre yaml>a: 1|</pre><p>b</p>");
+    try expect("---\n---\nb", "<pre yaml></pre><p>b</p>");
+    try expect("---\na: 1\n\nb", "<hr><p>a: 1</p><p>b</p>");
+    try expect("x\n\n---\na: 1\n---\n", "<p>x</p><hr><h2>a: 1</h>");
+    try expect("---\n[r]: <u>\n---\n[r]", "<pre yaml>[r]: <u>|</pre><p>[r]</p>");
+    const result = markdown.parse(&storage, "---\nmany words here\n---\none two");
+    try std.testing.expectEqual(2, result.word_count);
+}
+
 test "markdown: every prefix and every single-byte mutation parses" {
     const sample = "# T\n> - [x] *a* **b** `c` [d](e) ![f](g)\n>   1. x\n\n```m\ny\n```\n" ++
         "| a | b |\n|---|:-:|\n| 1 | 2 |\n\n[r]: <u>\n<br>&amp;~~z~~ https://q.r\n";
