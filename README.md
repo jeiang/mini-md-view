@@ -11,9 +11,9 @@ is laid out by TextKit, and diagrams are drawn with CoreGraphics.
 The Nix shell provides Zig and the macOS SDK.
 
 ```sh
-nix develop -c zig build                      # writes zig-out/Minied.app and zig-out/bin/minied
-nix develop -c zig build run -- README.md     # builds, then opens a file
-nix develop -c zig build test                 # tests the parser and the diagram layout
+nix develop -c zig build                    # zig-out/Minied.app
+nix develop -c zig build run -- README.md   # build, then open a file
+nix develop -c zig build test               # parser and diagram layout
 open zig-out/Minied.app --args "$PWD/README.md"
 ```
 
