@@ -33,11 +33,14 @@ pub const Document = struct {
     /// Owns the text system: the layout manager, the container, and through them the text.
     text_storage: Id,
     outline_view: Id,
-    zoom: f64,
     /// Modification time of the file when it was last loaded, in seconds.
     modified: f64,
     /// Smallest heading level in the document, which the outline shows without indentation.
     heading_level_min: u8,
+    word_count: u32,
+    /// The bytes of the last successful load. A zoom step renders them again.
+    source_buffer: [markdown.source_size_max]u8,
+    source_length: u32,
     content: render.Content,
 
     pub fn path(document: *const Document) []const u8 {
@@ -62,9 +65,18 @@ pub const LoadError = error{
 var documents: [documents_max]Document = undefined;
 var parse_storage: markdown.Storage = undefined;
 var scratch: [scratch_size]u8 align(16) = undefined;
+/// The zoom of every window. It is saved in the user defaults.
+var zoom_level: f64 = 1;
+const zoom_key = "Zoom";
 
 pub fn init() void {
     for (&documents) |*document| document.open = false;
+    const saved = objc.send(f64, defaults(), "doubleForKey:", .{cocoa.string(zoom_key)});
+    if (saved >= zoom_min and saved <= zoom_max) zoom_level = saved;
+}
+
+fn defaults() Id {
+    return objc.send(Id, objc.class("NSUserDefaults"), "standardUserDefaults", .{});
 }
 
 pub fn open_count() u32 {
@@ -108,16 +120,15 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
 
     @memcpy(document.path_buffer[0..file_path.len], file_path);
     document.path_length = @intCast(file_path.len);
-    document.zoom = 1;
-    document.modified = 0;
     document.content.reset();
     window_create(document, controller);
     document.open = true;
-    load(document) catch |err| {
+    document.modified = file_read(document, cocoa.string(file_path)) catch |err| {
         objc.send(void, document.window, "close", .{});
         assert(!document.open);
         return err;
     };
+    show(document, null);
     inset_update(document);
     objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
 }
@@ -167,7 +178,7 @@ pub fn refresh(document: *Document) void {
     assert(document.open);
     const modified = file_modified(cocoa.string(document.path())) orelse return;
     if (modified == document.modified) return;
-    load(document) catch {};
+    reload(document) catch {};
 }
 
 pub fn refresh_all() void {
@@ -176,34 +187,43 @@ pub fn refresh_all() void {
     }
 }
 
+/// Reads the file again and shows it at the same scroll position. On error, the view is
+/// unchanged.
 pub fn reload(document: *Document) LoadError!void {
     assert(document.open);
-    try load(document);
+    document.modified = try file_read(document, cocoa.string(document.path()));
+    show(document, scroll_get(document));
+}
+
+/// Renders the kept bytes again, for example after a zoom step, and keeps the scroll position.
+pub fn rerender(document: *Document) void {
+    assert(document.open);
+    show(document, scroll_get(document));
 }
 
 pub const ZoomChange = enum { in, out, reset };
 
-pub fn zoom(document: *Document, change: ZoomChange) void {
-    assert(document.open);
+/// Changes the zoom of every window and saves it.
+pub fn zoom(change: ZoomChange) void {
     const zoom_new = switch (change) {
-        .in => @min(zoom_max, document.zoom * zoom_step),
-        .out => @max(zoom_min, document.zoom / zoom_step),
+        .in => @min(zoom_max, zoom_level * zoom_step),
+        .out => @max(zoom_min, zoom_level / zoom_step),
         .reset => 1,
     };
-    if (zoom_new == document.zoom) return;
-    const zoom_old = document.zoom;
-    document.zoom = zoom_new;
-    load(document) catch {
-        document.zoom = zoom_old;
-        return;
-    };
-    inset_update(document);
+    if (zoom_new == zoom_level) return;
+    zoom_level = zoom_new;
+    objc.send(void, defaults(), "setDouble:forKey:", .{ zoom_level, cocoa.string(zoom_key) });
+    for (&documents) |*document| {
+        if (!document.open) continue;
+        rerender(document);
+        inset_update(document);
+    }
 }
 
-/// Reads, parses and renders the file, and shows the result. On error, the view is unchanged.
-fn load(document: *Document) LoadError!void {
+/// Reads the file into the kept bytes of the document and returns its modification time. On
+/// error, the kept bytes are unchanged.
+fn file_read(document: *Document, file_path: Id) LoadError!f64 {
     assert(document.open);
-    const file_path = cocoa.string(document.path());
     const modified = file_modified(file_path) orelse return error.Unreadable;
     const data = objc.send(
         ?Id,
@@ -219,44 +239,62 @@ fn load(document: *Document) LoadError!void {
     if (size > 0) source = objc.send([*]const u8, data, "bytes", .{})[0..size];
     if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) source = source[3..];
     if (!std.unicode.utf8ValidateSlice(source)) return error.NotText;
+    @memcpy(document.source_buffer[0..source.len], source);
+    document.source_length = @intCast(source.len);
+    return modified;
+}
 
-    const clip_view = objc.send(Id, document.scroll_view, "contentView", .{});
-    const scroll_origin = objc.send(cocoa.Rect, clip_view, "bounds", .{}).origin;
-    const first_load = document.modified == 0;
-
+/// Parses and renders the kept bytes and shows the result. Then scrolls to `scroll`, the
+/// vertical origin of the visible area, unless it is null.
+fn show(document: *Document, scroll: ?f64) void {
+    assert(document.open);
+    assert(document.source_length <= markdown.source_size_max);
+    const file_path = cocoa.string(document.path());
     // The old attributed string points into `content`, so it goes away before the rebuild.
     const empty = objc.new("NSAttributedString");
     objc.send(void, document.text_storage, "setAttributedString:", .{empty});
-    const parsed = markdown.parse(&parse_storage, source);
+    const parsed = markdown.parse(
+        &parse_storage,
+        document.source_buffer[0..document.source_length],
+    );
     const attributed = render.build(parsed.events, &document.content, .{
-        .zoom = document.zoom,
+        .zoom = zoom_level,
         .directory = objc.send(Id, file_path, "stringByDeletingLastPathComponent", .{}),
         .scratch = &scratch,
         .truncated = parsed.truncated,
     });
     objc.send(void, document.text_storage, "setAttributedString:", .{attributed});
-    document.modified = modified;
+    document.word_count = parsed.word_count;
 
     document.heading_level_min = 6;
     for (document.content.headings_slice()) |heading| {
         document.heading_level_min = @min(document.heading_level_min, heading.level);
     }
     objc.send(void, document.outline_view, "reloadData", .{});
-    title_update(document, file_path, parsed.word_count);
-    if (!first_load) {
-        const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
-        const container = objc.send(Id, document.text_view, "textContainer", .{});
-        objc.send(void, layout_manager, "ensureLayoutForTextContainer:", .{container});
-        objc.send(void, document.text_view, "scrollPoint:", .{scroll_origin});
-    }
+    title_update(document);
+    if (scroll) |y| scroll_set(document, y);
 }
 
-fn title_update(document: *Document, file_path: Id, word_count: u32) void {
+fn scroll_get(document: *const Document) f64 {
+    const clip_view = objc.send(Id, document.scroll_view, "contentView", .{});
+    return objc.send(cocoa.Rect, clip_view, "bounds", .{}).origin.y;
+}
+
+fn scroll_set(document: *Document, y: f64) void {
+    const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
+    const container = objc.send(Id, document.text_view, "textContainer", .{});
+    objc.send(void, layout_manager, "ensureLayoutForTextContainer:", .{container});
+    objc.send(void, document.text_view, "scrollPoint:", .{cocoa.Point{ .x = 0, .y = y }});
+}
+
+fn title_update(document: *Document) void {
     const window = document.window;
+    const file_path = cocoa.string(document.path());
     objc.send(void, window, "setTitle:", .{objc.send(Id, file_path, "lastPathComponent", .{})});
     const url = objc.send(Id, objc.class("NSURL"), "fileURLWithPath:", .{file_path});
     objc.send(void, window, "setRepresentedURL:", .{url});
     const words_per_minute = 230;
+    const word_count = document.word_count;
     const minutes = @max(1, (word_count + words_per_minute / 2) / words_per_minute);
     var buffer: [64]u8 = undefined;
     const subtitle = std.fmt.bufPrint(
@@ -273,7 +311,7 @@ fn title_update(document: *Document, file_path: Id, word_count: u32) void {
 pub fn inset_update(document: *Document) void {
     assert(document.open);
     const width = objc.send(cocoa.Size, document.scroll_view, "contentSize", .{}).width;
-    const column = render.column_width * document.zoom;
+    const column = render.column_width * zoom_level;
     const inset: cocoa.Size = .{
         .width = @floor(@max(inset_min, (width - column) / 2)),
         .height = 24,

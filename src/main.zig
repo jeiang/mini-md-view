@@ -234,15 +234,15 @@ fn action_reload(_: Id, _: Selector, _: ?Id) callconv(.c) void {
 }
 
 fn action_zoom_in(_: Id, _: Selector, _: ?Id) callconv(.c) void {
-    if (document.current()) |current| document.zoom(current, .in);
+    document.zoom(.in);
 }
 
 fn action_zoom_out(_: Id, _: Selector, _: ?Id) callconv(.c) void {
-    if (document.current()) |current| document.zoom(current, .out);
+    document.zoom(.out);
 }
 
 fn action_zoom_reset(_: Id, _: Selector, _: ?Id) callconv(.c) void {
-    if (document.current()) |current| document.zoom(current, .reset);
+    document.zoom(.reset);
 }
 
 /// Document actions need a document. Opening a file is always possible.
