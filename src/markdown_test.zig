@@ -54,6 +54,9 @@ fn print(events: []const markdown.Event) []const u8 {
         .row_end => output.add("</tr>", .{}),
         .cell_start => |cell_align| output.add("<td {s}>", .{@tagName(cell_align)}),
         .cell_end => output.add("</td>", .{}),
+        .footnote_start => |number| output.add("<fn {d}>", .{number}),
+        .footnote_end => output.add("</fn>", .{}),
+        .footnote_reference => |number| output.add("<ref {d}>", .{number}),
         .text => |bytes| output.add("{s}", .{bytes}),
         .code => |bytes| output.add("<code>{s}</code>", .{bytes}),
         .soft_break => output.add("<soft>", .{}),
@@ -150,6 +153,46 @@ test "markdown: tables" {
         "<table 2><tr head><td default>a</td><td default>b</td></tr></table>",
     );
     try expect("a | b\n---", "<h2>a | b</h>");
+}
+
+test "markdown: footnotes" {
+    try expect(
+        "A[^b] and[^a] again[^B].\n\n[^a]: First.\n[^b]: Second *x*.\n",
+        "<p>A<ref 1> and<ref 2> again<ref 1>.</p>" ++
+            "<hr><fn 1><p>Second <em>x</em>.</p></fn><fn 2><p>First.</p></fn>",
+    );
+    try expect(
+        "[^n]: One\n    two\n\n    Para.\n\n        code\nAfter[^n]",
+        "<p>After<ref 1></p><hr><fn 1><p>One<soft>two</p><p>Para.</p><pre >code|</pre></fn>",
+    );
+    try expect("Text\n[^n]: Note\n\n[^n]", "<p>Text</p><p><ref 1></p><hr><fn 1><p>Note</p></fn>");
+    try expect(
+        "- a\n[^n]: Note\n\nb[^n]",
+        "<ul1><li><p>a</p></li></list><p>b<ref 1></p><hr><fn 1><p>Note</p></fn>",
+    );
+    try expect("[^u]: Unused\n\nNo[^x] [^] x[^a b]", "<p>No[^x] [^] x[^a b]</p>");
+    try expect("[^a]: One\n[^A]: Two\n\nx[^a]", "<p>x<ref 1></p><hr><fn 1><p>One</p></fn>");
+    try expect("[^a]:\n\nx[^a]", "<p>x<ref 1></p><hr><fn 1></fn>");
+    try expect(" [^a]: x\n\n[^a]", "<p>[^a]: x</p><p>[^a]</p>");
+    try expect("```\n[^a]: x\n```\n[^a]", "<pre >[^a]: x|</pre><p>[^a]</p>");
+    try expect("<!--\n[^a]: x\n-->\n[^a]", "<p>[^a]</p>");
+    try expect(
+        "`[^a]` [^a]\n\n[^a]: x",
+        "<p><code>[^a]</code> <ref 1></p><hr><fn 1><p>x</p></fn>",
+    );
+    try expect(
+        "> q[^a]\n\n[^a]: x[^a]",
+        "<quote><p>q<ref 1></p></quote><hr><fn 1><p>x<ref 1></p></fn>",
+    );
+    // Numbers follow the order in which references are parsed.
+    try expect(
+        "[^a]: x[^b]\n[^b]: y\n\nz[^a]",
+        "<p>z<ref 2></p><hr><fn 1><p>y</p></fn><fn 2><p>x<ref 1></p></fn>",
+    );
+    try expect(
+        "[link [^a]](u)\n\n[^a]: x",
+        "<p><a u>link <ref 1></a></p><hr><fn 1><p>x</p></fn>",
+    );
 }
 
 test "markdown: HTML comments" {
@@ -249,6 +292,26 @@ test "markdown: every prefix and every single-byte mutation parses" {
         try std.testing.expect(!result.truncated);
     }
     const mutations = "*_`[]()<>!#-|~&\\ \n";
+    for (0..sample.len) |index| {
+        for (mutations) |mutation| {
+            @memcpy(source_buffer[0..sample.len], sample);
+            source_buffer[index] = mutation;
+            const result = markdown.parse(&storage, source_buffer[0..sample.len]);
+            try std.testing.expect(balanced(result.events));
+        }
+    }
+}
+
+test "markdown: extensions survive every prefix and every single-byte mutation" {
+    const sample = "---\na: b\n---\n> [!NOTE]\n> n[^x]\n\n<!--\nc\n-->\n" ++
+        "<p align=\"center\"><img src='i.png' width=9 alt=\"q\"></p>\n" ++
+        "<a href=\"u\">*l*</a> t[^y]\n\n[^x]: one\n    two[^y]\n\n- i\n[^y]: three\n";
+    for (0..sample.len + 1) |length| {
+        const result = markdown.parse(&storage, sample[0..length]);
+        try std.testing.expect(!result.truncated);
+        try std.testing.expect(balanced(result.events));
+    }
+    const mutations = "[]^:<>!-\"'= \n";
     for (0..sample.len) |index| {
         for (mutations) |mutation| {
             @memcpy(source_buffer[0..sample.len], sample);

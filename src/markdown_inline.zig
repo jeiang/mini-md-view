@@ -17,6 +17,7 @@ const assert = std.debug.assert;
 const markdown = @import("markdown.zig");
 const Event = markdown.Event;
 const Definition = markdown.Definition;
+const Footnote = markdown.Footnote;
 
 pub const tokens_max = 1 << 15;
 
@@ -27,6 +28,7 @@ const opener_distance_max = 1024;
 const code_span_size_max = 1 << 16;
 const entity_size_max = 32;
 const html_tag_size_max = 2048;
+const footnote_label_size_max = 128;
 
 /// HTML tags that are dropped, while their content stays.
 const html_wrappers = [_][]const u8{ "p", "div", "span", "center", "picture" };
@@ -48,6 +50,8 @@ const Kind = enum(u8) {
     link_end,
     image_start,
     image_end,
+    /// `[^label]` with a footnote definition.
+    footnote,
     /// A token that was cancelled, such as an autolink inside a link.
     skip,
 };
@@ -61,6 +65,8 @@ pub const Token = struct {
     /// Images only: the display size in pixels, or zero when the source does not give it.
     width: u32 = 0,
     height: u32 = 0,
+    /// Footnotes only: the index of the footnote.
+    footnote: u32 = 0,
     /// Delimiters only: the delimiter character, and how many are not yet matched.
     marker: u8 = 0,
     count: u8 = 0,
@@ -78,6 +84,9 @@ pub const Input = struct {
     text: []u8,
     tokens: *[tokens_max]Token,
     definitions: []const Definition,
+    /// Footnotes that have a definition. A reference gives a footnote its number.
+    footnotes: []Footnote,
+    footnote_count: *u32,
     /// Free space for the output events.
     events: []Event,
 };
@@ -117,6 +126,7 @@ const Scanner = struct {
     text: []u8,
     tokens: *[tokens_max]Token,
     definitions: []const Definition,
+    footnotes: []const Footnote,
     token_count: u32 = 0,
     position: u32 = 0,
     /// Start of the pending run of plain text.
@@ -168,7 +178,7 @@ const Scanner = struct {
                 '\\' => scanner.scan_escape(),
                 '`' => scanner.scan_code(),
                 '*', '_', '~' => scanner.scan_delimiter(),
-                '[' => scanner.scan_bracket_open(1),
+                '[' => if (!scanner.scan_footnote()) scanner.scan_bracket_open(1),
                 '!' => if (scanner.byte_at(scanner.position + 1) == '[') {
                     scanner.scan_bracket_open(2);
                 } else {
@@ -270,6 +280,21 @@ const Scanner = struct {
             .can_close = can_close,
         });
         scanner.advance_to(scanner.position + length);
+    }
+
+    fn scan_footnote(scanner: *Scanner) bool {
+        const label = footnote_label_match(scanner.rest()) orelse return false;
+        const index = footnote_find(scanner.footnotes, label) orelse return false;
+        scanner.run_flush(scanner.position);
+        const end = scanner.position + @as(u32, @intCast(label.len + "[^]".len));
+        scanner.token_add(.{
+            .kind = .footnote,
+            .start = scanner.position,
+            .end = end,
+            .footnote = index,
+        });
+        scanner.advance_to(end);
+        return true;
     }
 
     fn scan_bracket_open(scanner: *Scanner, length: u32) void {
@@ -797,6 +822,8 @@ fn emphasis_opener_find(tokens: []Token, closer_index: usize) ?usize {
 const Emitter = struct {
     text: []const u8,
     events: []Event,
+    footnotes: []Footnote,
+    footnote_count: *u32,
     event_count: u32 = 0,
     word_count: u32 = 0,
 
@@ -828,6 +855,14 @@ const Emitter = struct {
                 .height = token.height,
             } }),
             .image_end => emitter.add(.image_end),
+            .footnote => {
+                const footnote = &emitter.footnotes[token.footnote];
+                if (footnote.number == 0) {
+                    emitter.footnote_count.* += 1;
+                    footnote.number = emitter.footnote_count.*;
+                }
+                emitter.add(.{ .footnote_reference = footnote.number });
+            },
             .skip => {},
             .delimiter => {
                 for (token.closes[0..token.close_count]) |mark| emitter.add(switch (mark) {
@@ -866,6 +901,7 @@ pub fn parse(input: Input) Output {
         .text = input.text,
         .tokens = input.tokens,
         .definitions = input.definitions,
+        .footnotes = input.footnotes,
     };
     scanner.scan();
     const tokens = scanner.tokens[0..scanner.token_count];
@@ -873,7 +909,12 @@ pub fn parse(input: Input) Output {
 
     var events_needed: u32 = 0;
     for (tokens) |*token| events_needed += token_event_count(token);
-    var emitter: Emitter = .{ .text = input.text, .events = input.events };
+    var emitter: Emitter = .{
+        .text = input.text,
+        .events = input.events,
+        .footnotes = input.footnotes,
+        .footnote_count = input.footnote_count,
+    };
     if (scanner.overflow or events_needed > input.events.len) {
         // The block is too complex: show it as plain text instead of dropping it.
         if (input.events.len > 0) emitter.text_add(input.text);
@@ -890,4 +931,23 @@ pub fn parse(input: Input) Output {
         .word_count = emitter.word_count,
         .truncated = false,
     };
+}
+
+/// Matches `[^label]` at the start of the bytes, and returns the label.
+pub fn footnote_label_match(bytes: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, bytes, "[^")) return null;
+    const window = bytes[2..@min(bytes.len, 2 + footnote_label_size_max + 1)];
+    for (window, 0..) |byte, index| {
+        if (byte == ']') return if (index == 0) null else window[0..index];
+        if (byte == '[' or std.ascii.isWhitespace(byte)) return null;
+    }
+    return null;
+}
+
+/// Returns the index of the footnote with the label, ignoring case.
+pub fn footnote_find(footnotes: []const Footnote, label: []const u8) ?u32 {
+    for (footnotes, 0..) |footnote, index| {
+        if (std.ascii.eqlIgnoreCase(footnote.label, label)) return @intCast(index);
+    }
+    return null;
 }

@@ -35,6 +35,7 @@ pub extern const NSLinkAttributeName: Id;
 pub extern const NSStrikethroughStyleAttributeName: Id;
 pub extern const NSToolTipAttributeName: Id;
 pub extern const NSCursorAttributeName: Id;
+pub extern const NSBaselineOffsetAttributeName: Id;
 
 pub extern const NSViewFrameDidChangeNotification: Id;
 pub extern const NSToolbarToggleSidebarItemIdentifier: Id;

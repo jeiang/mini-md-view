@@ -57,6 +57,10 @@ pub const Content = struct {
     /// Diagram sources and generated diagram text.
     text: [diagram_text_size_max]u8,
     text_count: u32,
+    /// Positions of footnote definitions and of their first references, by footnote number
+    /// minus one, or `location_none`.
+    footnote_locations: [markdown.footnotes_max]usize,
+    footnote_reference_locations: [markdown.footnotes_max]usize,
 
     pub fn reset(content: *Content) void {
         content.heading_count = 0;
@@ -65,13 +69,32 @@ pub const Content = struct {
         content.command_count = 0;
         content.point_count = 0;
         content.text_count = 0;
+        content.footnote_locations = @splat(location_none);
+        content.footnote_reference_locations = @splat(location_none);
     }
 
     pub fn headings_slice(content: *const Content) []const Heading {
         assert(content.heading_count <= headings_max);
         return content.headings[0..content.heading_count];
     }
+
+    /// The position that a `fn-N` or `fnref-N` link fragment points to.
+    pub fn footnote_location(content: *const Content, fragment: []const u8) ?usize {
+        const reference = std.mem.startsWith(u8, fragment, "fnref-");
+        if (!reference and !std.mem.startsWith(u8, fragment, "fn-")) return null;
+        const digits = fragment[if (reference) "fnref-".len else "fn-".len..];
+        const number = std.fmt.parseInt(u32, digits, 10) catch return null;
+        if (number == 0 or number > markdown.footnotes_max) return null;
+        const locations = if (reference)
+            &content.footnote_reference_locations
+        else
+            &content.footnote_locations;
+        const location = locations[number - 1];
+        return if (location == location_none) null else location;
+    }
 };
+
+const location_none = std.math.maxInt(usize);
 
 pub const Options = struct {
     zoom: f64,
@@ -95,9 +118,10 @@ const FontStyle = struct {
     italic: bool = false,
     size: u8 = 0,
 };
-const font_sizes_count = 9;
+const font_sizes_count = 10;
 const font_size_code_block = 7;
 const font_size_tiny = 8;
+const font_size_note = 9;
 
 const CodeMode = enum { none, plain, mermaid };
 
@@ -128,6 +152,8 @@ const Builder = struct {
     image_hidden_depth: u32 = 0,
     /// The alternative text of an image that was not loaded links to the image source.
     image_link: bool = false,
+    /// The string length after the last paragraph, which a footnote back link can join.
+    paragraph_end_location: usize = 0,
 
     code_mode: CodeMode = .none,
     code_block: ?Id = null,
@@ -163,6 +189,7 @@ const Builder = struct {
             1...6 => sizes_heading[index - 1],
             font_size_code_block => size_code,
             font_size_tiny => 1,
+            font_size_note => size_body * 0.7,
             else => unreachable,
         });
     }
@@ -639,7 +666,10 @@ fn event_apply(builder: *Builder, event: markdown.Event) void {
             container_end(builder);
         },
         .paragraph_start => builder.text_marker = builder.text_block_begin(),
-        .paragraph_end => builder.text_block_end(builder.gap(), 0),
+        .paragraph_end => {
+            builder.text_block_end(builder.gap(), 0);
+            builder.paragraph_end_location = builder.length();
+        },
         .heading_start => |level| {
             assert(level >= 1 and level <= 6);
             builder.heading_level = level;
@@ -667,6 +697,8 @@ fn event_apply(builder: *Builder, event: markdown.Event) void {
             cell_begin(builder);
         },
         .cell_end => cell_end(builder, builder.table_align),
+        .footnote_start => |number| footnote_begin(builder, number),
+        .footnote_end => footnote_end(builder),
         else => inline_apply(builder, event),
     }
 }
@@ -721,6 +753,61 @@ fn item_begin(builder: *Builder, task: markdown.Task) void {
     builder.marker_pending = true;
     builder.marker_task = task;
     builder.block_first = true;
+}
+
+/// A footnote definition is shown as a one-item ordered list that starts at its number.
+fn footnote_begin(builder: *Builder, number: u32) void {
+    assert(number >= 1 and number <= markdown.footnotes_max);
+    builder.marker_flush();
+    builder.content.footnote_locations[number - 1] = builder.length();
+    builder.frame_push(.{ .list = .{
+        .ordered = true,
+        .number = number,
+        .tight = false,
+        .item_count = 0,
+    } });
+    item_begin(builder, .none);
+}
+
+/// Ends a footnote with a link back to its first reference, on its last paragraph.
+fn footnote_end(builder: *Builder) void {
+    assert(builder.frame_count >= 2);
+    assert(builder.frames[builder.frame_count - 1] == .item);
+    const number = builder.frames[builder.frame_count - 2].list.number;
+    var buffer: [32]u8 = undefined;
+    assert(builder.link == null);
+    builder.link = cocoa.string(std.fmt.bufPrint(&buffer, "#fnref-{d}", .{number}) catch {
+        unreachable;
+    });
+    const back_attributes = builder.attributes(.{});
+    builder.link = null;
+    const back = " \u{21A9}\u{FE0E}";
+    const end = builder.length();
+    if (!builder.marker_pending and builder.paragraph_end_location == end) {
+        assert(end > 0);
+        const style = objc.send(
+            ?Id,
+            builder.storage,
+            "attribute:atIndex:effectiveRange:",
+            .{ cocoa.NSParagraphStyleAttributeName, end - 1, @as(?*cocoa.Range, null) },
+        );
+        if (style) |paragraph_style| {
+            dictionary_set(back_attributes, cocoa.NSParagraphStyleAttributeName, paragraph_style);
+        }
+        const piece = objc.autorelease(objc.send(
+            Id,
+            objc.alloc("NSAttributedString"),
+            "initWithString:attributes:",
+            .{ cocoa.string(back), back_attributes },
+        ));
+        objc.send(void, builder.storage, "insertAttributedString:atIndex:", .{ piece, end - 1 });
+    } else {
+        builder.text_marker = builder.text_block_begin();
+        builder.append(back, back_attributes);
+        builder.text_block_end(builder.gap(), 0);
+    }
+    container_end(builder);
+    container_end(builder);
 }
 
 fn heading_end(builder: *Builder) void {
@@ -1030,6 +1117,7 @@ fn inline_apply(builder: *Builder, event: markdown.Event) void {
         .soft_break => builder.append_text(" "),
         // A line separator breaks the line and stays inside the paragraph.
         .hard_break => builder.append_text("\u{2028}"),
+        .footnote_reference => |number| footnote_reference_add(builder, number),
         .emphasis_start => builder.italic_depth += 1,
         .emphasis_end => builder.italic_depth -= 1,
         .strong_start => builder.bold_depth += 1,
@@ -1045,6 +1133,26 @@ fn inline_apply(builder: *Builder, event: markdown.Event) void {
         },
         else => unreachable,
     }
+}
+
+/// Adds a raised footnote number that links to the footnote.
+fn footnote_reference_add(builder: *Builder, number: u32) void {
+    assert(number >= 1 and number <= markdown.footnotes_max);
+    const locations = &builder.content.footnote_reference_locations;
+    if (locations[number - 1] == location_none) locations[number - 1] = builder.length();
+    var buffer: [32]u8 = undefined;
+    const link = builder.link;
+    builder.link = cocoa.string(std.fmt.bufPrint(&buffer, "#fn-{d}", .{number}) catch {
+        unreachable;
+    });
+    var style = builder.style_current();
+    style.size = font_size_note;
+    const reference_attributes = builder.attributes(style);
+    builder.link = link;
+    const offset: isize = @intFromFloat(@round(builder.scaled(size_body * 0.35)));
+    dictionary_set(reference_attributes, cocoa.NSBaselineOffsetAttributeName, cocoa.number(offset));
+    const text = std.fmt.bufPrint(&buffer, "{d}", .{number}) catch unreachable;
+    builder.append(text, reference_attributes);
 }
 
 fn image_begin(builder: *Builder, image_event: markdown.Image) void {
