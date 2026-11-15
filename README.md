@@ -71,3 +71,8 @@ working memory is static, which bounds what the viewer accepts.
 A file over 4 MB does not open. Past the other limits the viewer degrades: deeper nesting is
 shown as plain text, and a diagram or the tail of a document that does not fit is replaced by a
 notice.
+
+## License
+
+mini-md-view is under the [MIT license](LICENSE). `docs/TIGER_STYLE.md` is a copy of TigerBeetle's
+style guide, which is under the [Apache License 2.0](docs/TIGER_STYLE.LICENSE).
