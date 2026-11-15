@@ -69,8 +69,12 @@ pub fn build(b: *std.Build) void {
     icon_run.setCwd(b.path("."));
     b.step("icon", "Redraw assets/icon.png and assets/AppIcon.icns").dependOn(&icon_run.step);
 
+    // The app runs from its bundle, so that it has the bundle's icon and document types.
     const run_step = b.step("run", "Run the app");
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addRunFile(.{ .relative = .{
+        .base = .install_prefix,
+        .sub_path = "MiniMdView.app/Contents/MacOS/mini-md-view",
+    } });
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
