@@ -37,6 +37,8 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
 - Follows the system appearance and accent color.
 - Find, copy, print and zoom work on the whole document, diagrams included. The zoom applies to
   every window, and the viewer remembers it.
+- A table too wide for the text column scrolls sideways on its own. Find, selection and printing
+  in the document do not reach into such a table.
 - Links to headings scroll, links to other Markdown files show them in the same window, and web
   and mail links go to the default application. A link to any other local file shows the file in
   Finder and does not open it, so a document cannot run a script with one click.

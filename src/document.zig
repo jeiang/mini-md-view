@@ -453,6 +453,7 @@ fn show(document: *Document, scroll: ?f64) void {
     // The old attributed string points into `content`, so it goes away before the rebuild.
     const empty = objc.new("NSAttributedString");
     objc.send(void, document.text_storage, "setAttributedString:", .{empty});
+    render.tables_remove(document.text_view);
     const parsed = markdown.parse(
         &parse_storage,
         document.source_buffer[0..document.source_length],
