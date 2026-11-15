@@ -29,13 +29,13 @@ pub const type_range = "{_NSRange=QQ}";
 // Attributed string keys.
 pub extern const NSFontAttributeName: Id;
 pub extern const NSForegroundColorAttributeName: Id;
-pub extern const NSBackgroundColorAttributeName: Id;
 pub extern const NSParagraphStyleAttributeName: Id;
 pub extern const NSLinkAttributeName: Id;
 pub extern const NSStrikethroughStyleAttributeName: Id;
 pub extern const NSToolTipAttributeName: Id;
 pub extern const NSCursorAttributeName: Id;
 pub extern const NSBaselineOffsetAttributeName: Id;
+pub extern const NSKernAttributeName: Id;
 
 pub extern const NSViewFrameDidChangeNotification: Id;
 pub extern const NSViewBoundsDidChangeNotification: Id;
@@ -193,6 +193,10 @@ pub fn color_alpha(base: Id, alpha: f64) Id {
 
 pub fn number(value: isize) Id {
     return objc.send(Id, objc.class("NSNumber"), "numberWithInteger:", .{value});
+}
+
+pub fn number_float(value: f64) Id {
+    return objc.send(Id, objc.class("NSNumber"), "numberWithDouble:", .{value});
 }
 
 /// An autoreleased NSArray of the objects.

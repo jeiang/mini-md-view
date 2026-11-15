@@ -626,6 +626,199 @@ fn text_block_new(class_slot: *?Id, comptime name: [:0]const u8, draw: *const an
     return objc.autorelease(objc.send(Id, allocated, "init", .{}));
 }
 
+// Inline code. `NSBackgroundColorAttributeName` fills whole line fragments, so a span that wraps
+// fills to the end of the line and into the line gap. The layout manager draws the spans instead.
+
+const code_span_padding: f64 = 3;
+const code_span_padding_vertical: f64 = 1;
+const code_span_radius: f64 = 4;
+
+/// Marks inline code. The value is the fill color of the span background.
+fn code_span_key() Id {
+    const Cache = struct {
+        var key: ?Id = null;
+    };
+    if (Cache.key == null) Cache.key = objc.retain(cocoa.string("MiniMdCodeSpan"));
+    return Cache.key.?;
+}
+
+fn code_span_append(builder: *Builder, bytes: []const u8) void {
+    if (bytes.len == 0) return;
+    var style = builder.style_current();
+    style.mono = true;
+    const code_attributes = builder.attributes(style);
+    dictionary_set(
+        code_attributes,
+        code_span_key(),
+        cocoa.color_alpha(cocoa.color("labelColor"), 0.07),
+    );
+    // Kerning after the character before the span and after the last character of the span
+    // makes room for the padding, so the background does not cover the text around it.
+    const kern = cocoa.number_float(code_span_padding);
+    const length = builder.length();
+    if (length > 0) {
+        const string = objc.send(Id, builder.storage, "string", .{});
+        const previous = objc.send(u16, string, "characterAtIndex:", .{length - 1});
+        if (previous != '\n' and previous != 0x2028) {
+            objc.send(void, builder.storage, "addAttribute:value:range:", .{
+                cocoa.NSKernAttributeName,
+                kern,
+                cocoa.Range{ .location = length - 1, .length = 1 },
+            });
+        }
+    }
+    builder.append(bytes, code_attributes);
+    objc.send(void, builder.storage, "addAttribute:value:range:", .{
+        cocoa.NSKernAttributeName,
+        kern,
+        cocoa.Range{ .location = builder.length() - 1, .length = 1 },
+    });
+}
+
+var layout_manager_class: ?Id = null;
+
+/// An autoreleased layout manager that draws inline code backgrounds.
+pub fn layout_manager_new() Id {
+    if (layout_manager_class == null) {
+        layout_manager_class = objc.class_define("MiniMdLayoutManager", "NSLayoutManager", &.{.{
+            .name = "drawBackgroundForGlyphRange:atPoint:",
+            .types = "v@:" ++ cocoa.type_range ++ cocoa.type_point,
+            .implementation = &layout_draw_background,
+        }}, false);
+    }
+    const allocated = objc.send(Id, layout_manager_class.?, "alloc", .{});
+    return objc.autorelease(objc.send(Id, allocated, "init", .{}));
+}
+
+fn layout_draw_background(
+    manager: Id,
+    _: objc.Selector,
+    glyphs: cocoa.Range,
+    origin: cocoa.Point,
+) callconv(.c) void {
+    // Text blocks draw their backgrounds here, so the spans go on top of table cells and quotes.
+    objc.send_super(void, manager, "NSLayoutManager", "drawBackgroundForGlyphRange:atPoint:", .{
+        glyphs,
+        origin,
+    });
+    const storage = objc.send(?Id, manager, "textStorage", .{}) orelse return;
+    const characters = objc.send(
+        cocoa.Range,
+        manager,
+        "characterRangeForGlyphRange:actualGlyphRange:",
+        .{ glyphs, @as(?*cocoa.Range, null) },
+    );
+    const end = characters.location + characters.length;
+    var index = characters.location;
+    while (index < end) {
+        var run: cocoa.Range = undefined;
+        const fill = objc.send(
+            ?Id,
+            storage,
+            "attribute:atIndex:longestEffectiveRange:inRange:",
+            .{ code_span_key(), index, &run, characters },
+        );
+        assert(run.length > 0);
+        index = run.location + run.length;
+        if (fill) |color| code_span_draw(manager, storage, run, color, origin);
+    }
+}
+
+/// Draws one rounded background for each line that a code span is on.
+fn code_span_draw(manager: Id, storage: Id, run: cocoa.Range, fill: Id, origin: cocoa.Point) void {
+    const string = objc.send(Id, storage, "string", .{});
+    const context = cocoa.context_current();
+    const run_glyphs = objc.send(
+        cocoa.Range,
+        manager,
+        "glyphRangeForCharacterRange:actualCharacterRange:",
+        .{ run, @as(?*cocoa.Range, null) },
+    );
+    const glyph_end = run_glyphs.location + run_glyphs.length;
+    var glyph = run_glyphs.location;
+    while (glyph < glyph_end) {
+        var line: cocoa.Range = undefined;
+        const line_rect = objc.send(
+            cocoa.Rect,
+            manager,
+            "lineFragmentRectForGlyphAtIndex:effectiveRange:",
+            .{ glyph, &line },
+        );
+        const part_end = @min(glyph_end, line.location + line.length);
+        assert(part_end > glyph);
+        var part = objc.send(
+            cocoa.Range,
+            manager,
+            "characterRangeForGlyphRange:actualGlyphRange:",
+            .{ cocoa.Range{ .location = glyph, .length = part_end - glyph }, @as(?*cocoa.Range, null) },
+        );
+        glyph = part_end;
+        // A span that wraps at a space keeps the space at the end of the line. It gets no fill.
+        while (part.length > 0 and code_span_space(string, part.location)) {
+            part.location += 1;
+            part.length -= 1;
+        }
+        while (part.length > 0 and code_span_space(string, part.location + part.length - 1)) {
+            part.length -= 1;
+        }
+        if (part.length == 0) continue;
+        const part_glyphs = objc.send(
+            cocoa.Range,
+            manager,
+            "glyphRangeForCharacterRange:actualCharacterRange:",
+            .{ part, @as(?*cocoa.Range, null) },
+        );
+        const container = objc.send(
+            ?Id,
+            manager,
+            "textContainerForGlyphAtIndex:effectiveRange:",
+            .{ part_glyphs.location, @as(?*cocoa.Range, null) },
+        ) orelse continue;
+        const bounds = objc.send(
+            cocoa.Rect,
+            manager,
+            "boundingRectForGlyphRange:inTextContainer:",
+            .{ part_glyphs, container },
+        );
+        // The kerning after the last character is padding, which the width already includes.
+        const last = part.location + part.length - 1;
+        const kern_value = objc.send(?Id, storage, "attribute:atIndex:effectiveRange:", .{
+            cocoa.NSKernAttributeName,
+            last,
+            @as(?*cocoa.Range, null),
+        });
+        const kern = if (kern_value) |value| objc.send(f64, value, "doubleValue", .{}) else 0;
+        const font = objc.send(?Id, storage, "attribute:atIndex:effectiveRange:", .{
+            cocoa.NSFontAttributeName,
+            part.location,
+            @as(?*cocoa.Range, null),
+        }) orelse continue;
+        const ascender = objc.send(f64, font, "ascender", .{});
+        const descender = objc.send(f64, font, "descender", .{});
+        const location = objc.send(
+            cocoa.Point,
+            manager,
+            "locationForGlyphAtIndex:",
+            .{part_glyphs.location},
+        );
+        const baseline = origin.y + line_rect.origin.y + location.y;
+        const rect = cocoa.Rect.init(
+            origin.x + bounds.origin.x - code_span_padding,
+            baseline - ascender - code_span_padding_vertical,
+            @max(0, bounds.size.width - kern) + code_span_padding * 2,
+            ascender - descender + code_span_padding_vertical * 2,
+        );
+        cocoa.path_add_rounded(context, rect, code_span_radius);
+        objc.send(void, fill, "setFill", .{});
+        cocoa.CGContextFillPath(context);
+    }
+}
+
+fn code_span_space(string: Id, index: usize) bool {
+    const character = objc.send(u16, string, "characterAtIndex:", .{index});
+    return character == ' ' or character == '\t' or character == 0xA0;
+}
+
 /// Sets an absolute width on one edge of a text block layer.
 fn block_edge_set(block: Id, layer: cocoa.BlockLayer, edge: cocoa.Edge, width: f64) void {
     assert(width >= 0);
@@ -1243,17 +1436,7 @@ fn table_end(builder: *Builder) void {
 fn inline_apply(builder: *Builder, event: markdown.Event) void {
     switch (event) {
         .text => |bytes| builder.append_text(bytes),
-        .code => |bytes| {
-            var style = builder.style_current();
-            style.mono = true;
-            const code_attributes = builder.attributes(style);
-            dictionary_set(
-                code_attributes,
-                cocoa.NSBackgroundColorAttributeName,
-                cocoa.color_alpha(cocoa.color("labelColor"), 0.07),
-            );
-            builder.append(bytes, code_attributes);
-        },
+        .code => |bytes| code_span_append(builder, bytes),
         .soft_break => builder.append_text(" "),
         // A line separator breaks the line and stays inside the paragraph.
         .hard_break => builder.append_text("\u{2028}"),
