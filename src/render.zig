@@ -13,6 +13,7 @@ const address = @import("address.zig");
 const canvas = @import("canvas.zig");
 const markdown = @import("markdown.zig");
 const mermaid = @import("mermaid.zig");
+const highlight = @import("highlight.zig");
 const remote = @import("remote.zig");
 const scene = @import("scene.zig");
 const Id = objc.Id;
@@ -127,7 +128,7 @@ const font_size_code_block = 7;
 const font_size_tiny = 8;
 const font_size_note = 9;
 
-const CodeMode = enum { none, plain, mermaid };
+const CodeMode = enum { none, plain, highlight, mermaid };
 
 const Builder = struct {
     storage: Id,
@@ -164,6 +165,10 @@ const Builder = struct {
     code_line_count: u32 = 0,
     mermaid_start: u32 = 0,
     mermaid_overflow: bool = false,
+    highlight_language: highlight.Language = undefined,
+    highlight_start: u32 = 0,
+    /// Zero until the first highlighted block of the document.
+    highlight_deadline: u64 = 0,
 
     table: ?Id = null,
     table_row: u32 = 0,
@@ -683,6 +688,7 @@ fn event_apply(builder: *Builder, event: markdown.Event) void {
         .code_block_start => |info| code_begin(builder, info),
         .code_line => |line| switch (builder.code_mode) {
             .plain => code_line_append(builder, line, false),
+            .highlight => highlight_line_add(builder, line),
             .mermaid => mermaid_line_add(builder, line),
             .none => unreachable,
         },
@@ -880,6 +886,11 @@ fn code_begin(builder: *Builder, info: []const u8) void {
         builder.mermaid_overflow = false;
     } else {
         code_block_open(builder);
+        if (highlight.language_find(language)) |found| {
+            builder.code_mode = .highlight;
+            builder.highlight_language = found;
+            builder.highlight_start = builder.content.text_count;
+        }
     }
 }
 
@@ -916,6 +927,7 @@ fn code_line_append(builder: *Builder, line: []const u8, caption: bool) void {
 }
 
 fn code_end(builder: *Builder) void {
+    if (builder.code_mode == .highlight) highlight_finish(builder);
     if (builder.code_mode == .mermaid) mermaid_finish(builder);
     if (builder.code_mode == .plain and builder.code_line_count == 0) {
         code_line_append(builder, "", false);
@@ -923,6 +935,130 @@ fn code_end(builder: *Builder) void {
     builder.code_block = null;
     builder.code_mode = .none;
     builder.block_first = false;
+}
+
+var highlight_spans: [highlight.spans_max]highlight.Span = undefined;
+
+/// Collects the source of a block to highlight. A block too large to highlight is shown plain.
+fn highlight_line_add(builder: *Builder, line: []const u8) void {
+    const content = builder.content;
+    assert(builder.code_mode == .highlight);
+    assert(content.text_count <= diagram_text_size_max);
+    const size = content.text_count - builder.highlight_start;
+    assert(size <= highlight.source_size_max);
+    if (line.len + 1 > highlight.source_size_max - size or
+        line.len + 1 > diagram_text_size_max - content.text_count)
+    {
+        const collected = content.text[builder.highlight_start..content.text_count];
+        highlight_lines_append(builder, collected, &.{});
+        content.text_count = builder.highlight_start;
+        builder.code_mode = .plain;
+        code_line_append(builder, line, false);
+        return;
+    }
+    @memcpy(content.text[content.text_count..][0..line.len], line);
+    content.text[content.text_count + line.len] = '\n';
+    content.text_count += @intCast(line.len + 1);
+}
+
+fn highlight_finish(builder: *Builder) void {
+    const content = builder.content;
+    assert(builder.code_mode == .highlight);
+    assert(builder.highlight_start <= content.text_count);
+    const source = content.text[builder.highlight_start..content.text_count];
+    if (builder.highlight_deadline == 0) builder.highlight_deadline = highlight.document_deadline();
+    const spans = highlight.highlight(
+        builder.highlight_language,
+        source,
+        &highlight_spans,
+        builder.highlight_deadline,
+    ) orelse &.{};
+    highlight_lines_append(builder, source, spans);
+    // The text view copied the source, so its space in the pool is free again.
+    content.text_count = builder.highlight_start;
+    builder.code_mode = .plain;
+}
+
+/// Appends the lines of `source`, each ended by a newline, and colors them with `spans`.
+fn highlight_lines_append(
+    builder: *Builder,
+    source: []const u8,
+    spans: []const highlight.Span,
+) void {
+    assert(source.len == 0 or source[source.len - 1] == '\n');
+    assert(source.len <= highlight.source_size_max);
+    var line_start: u32 = 0;
+    var span_index: usize = 0;
+    while (line_start < source.len) {
+        const line_end: u32 = @intCast(std.mem.indexOfScalarPos(u8, source, line_start, '\n').?);
+        const line = source[line_start..line_end];
+        code_line_append(builder, line, false);
+        span_index = code_line_color(builder, line, line_start, spans, span_index);
+        line_start = line_end + 1;
+    }
+    assert(span_index <= spans.len);
+}
+
+/// Colors the code line just appended with the spans that touch it, from `span_first` on.
+/// Returns the first span that continues on the next lines.
+fn code_line_color(
+    builder: *Builder,
+    line: []const u8,
+    line_start: u32,
+    spans: []const highlight.Span,
+    span_first: usize,
+) usize {
+    assert(span_first <= spans.len);
+    assert(builder.length() > builder.paragraph_start);
+    const line_end: u32 = line_start + @as(u32, @intCast(line.len));
+    // The text view shows invalid UTF-8 as an empty line, so byte offsets do not map to it.
+    const appended_length = builder.length() - builder.paragraph_start - 1;
+    const valid = highlight.utf16_length(line) == appended_length;
+    var span_index = span_first;
+    var byte: u32 = 0;
+    var unit: usize = 0;
+    while (span_index < spans.len and spans[span_index].start < line_end) {
+        const span = spans[span_index];
+        const start = @max(span.start, line_start) - line_start;
+        const end = @min(span.end, line_end) - line_start;
+        if (valid and start < end) {
+            assert(byte <= start);
+            unit += highlight.utf16_length(line[byte..start]);
+            const unit_start = unit;
+            unit += highlight.utf16_length(line[start..end]);
+            byte = end;
+            if (highlight_color(span.kind)) |color| objc.send(
+                void,
+                builder.storage,
+                "addAttribute:value:range:",
+                .{
+                    cocoa.NSForegroundColorAttributeName,
+                    color,
+                    cocoa.Range{
+                        .location = builder.paragraph_start + unit_start,
+                        .length = unit - unit_start,
+                    },
+                },
+            );
+        }
+        if (span.end > line_end) break;
+        span_index += 1;
+    }
+    return span_index;
+}
+
+/// Null for kinds shown in the color of the text around the block.
+fn highlight_color(kind: highlight.Kind) ?Id {
+    return switch (kind) {
+        .keyword, .tag => cocoa.color("systemPinkColor"),
+        .string => cocoa.color("systemRedColor"),
+        .comment => cocoa.color("secondaryLabelColor"),
+        .number, .constant => cocoa.color("systemOrangeColor"),
+        .type => cocoa.color("systemTealColor"),
+        .function => cocoa.color("systemBlueColor"),
+        .property, .attribute => cocoa.color("systemIndigoColor"),
+        .variable, .operator, .punctuation => null,
+    };
 }
 
 fn mermaid_line_add(builder: *Builder, line: []const u8) void {
