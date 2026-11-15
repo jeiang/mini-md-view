@@ -45,8 +45,9 @@ pub const Document = struct {
     source_length: u32,
     /// Watches the directory of the file. Null when no stream could be started.
     stream: ?cocoa.EventStream,
-    /// The subtitle says that the last reload failed, in place of the word count.
-    notice: bool,
+    /// Why the last reload failed. The subtitle says it in place of the word count, until a
+    /// load succeeds.
+    notice: ?LoadError,
     /// The outline row that a click selected. It stays selected while the scroll position that
     /// the click gave stays, even when the heading cannot reach the top of the visible area.
     heading_clicked: ?u32,
@@ -134,7 +135,7 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     document.history.push(file_path);
     document.content.reset();
     document.stream = null;
-    document.notice = false;
+    document.notice = null;
     document.outline_selecting = false;
     document.heading_clicked = null;
     window_create(document, controller);
@@ -288,13 +289,17 @@ pub fn close(document: *Document) void {
     _ = objc.autorelease(document.window);
 }
 
+/// The modification time of the file, or of the file that a symbolic link leads to.
 fn file_modified(file_path: Id) ?f64 {
     const manager = objc.send(Id, objc.class("NSFileManager"), "defaultManager", .{});
     const attributes = objc.send(
         ?Id,
         manager,
         "attributesOfItemAtPath:error:",
-        .{ file_path, @as(?*?Id, null) },
+        .{
+            objc.send(Id, file_path, "stringByResolvingSymlinksInPath", .{}),
+            @as(?*?Id, null),
+        },
     ) orelse return null;
     const date = objc.send(?Id, attributes, "fileModificationDate", .{}) orelse return null;
     return objc.send(f64, date, "timeIntervalSinceReferenceDate", .{});
@@ -306,23 +311,11 @@ fn file_modified(file_path: Id) ?f64 {
 fn refresh(document: *Document) void {
     assert(document.open);
     const modified = file_modified(cocoa.string(document.path()));
-    if (modified == document.modified and !document.notice) return;
-    reload(document) catch |err| notice_show(document, err);
-}
-
-fn notice_show(document: *Document, err: LoadError) void {
-    assert(document.open);
-    const reason = switch (err) {
-        error.Unreadable => "the file does not exist or cannot be read",
-        error.TooLarge => "the file is larger than 4 MB",
-        error.NotText => "the file is not UTF-8 text",
+    if (modified == document.modified and document.notice == null) return;
+    reload(document) catch |err| {
+        document.notice = err;
+        title_update(document);
     };
-    var buffer: [128]u8 = undefined;
-    const subtitle = std.fmt.bufPrint(&buffer, "Not reloaded: {s}", .{reason}) catch {
-        unreachable;
-    };
-    objc.send(void, document.window, "setSubtitle:", .{cocoa.string(subtitle)});
-    document.notice = true;
 }
 
 /// Watches the directory of the file rather than the file itself: editors often save by
@@ -428,6 +421,7 @@ fn file_read(document: *Document, file_path: Id) LoadError!f64 {
     if (!std.unicode.utf8ValidateSlice(source)) return error.NotText;
     @memcpy(document.source_buffer[0..source.len], source);
     document.source_length = @intCast(source.len);
+    document.notice = null;
     return modified;
 }
 
@@ -450,13 +444,13 @@ fn show(document: *Document, scroll: ?f64) void {
         .scratch = &scratch,
         .truncated = parsed.truncated,
     });
-    objc.send(void, document.text_storage, "setAttributedString:", .{attributed});
-    document.word_count = parsed.word_count;
-
+    // The outline can ask for a row while the text view takes the new text.
     document.heading_level_min = 6;
     for (document.content.headings_slice()) |heading| {
         document.heading_level_min = @min(document.heading_level_min, heading.level);
     }
+    objc.send(void, document.text_storage, "setAttributedString:", .{attributed});
+    document.word_count = parsed.word_count;
     objc.send(void, document.outline_view, "reloadData", .{});
     title_update(document);
     if (scroll) |y| scroll_set(document, y);
@@ -482,19 +476,24 @@ fn title_update(document: *Document) void {
     objc.send(void, window, "setTitle:", .{objc.send(Id, file_path, "lastPathComponent", .{})});
     const url = objc.send(Id, objc.class("NSURL"), "fileURLWithPath:", .{file_path});
     objc.send(void, window, "setRepresentedURL:", .{url});
-    const words_per_minute = 230;
-    const word_count = document.word_count;
-    const minutes = @max(1, (word_count + words_per_minute / 2) / words_per_minute);
-    var buffer: [64]u8 = undefined;
-    const subtitle = std.fmt.bufPrint(
-        &buffer,
-        "{d} words · {d} min read",
-        .{ word_count, minutes },
-    ) catch {
-        unreachable;
+    var buffer: [128]u8 = undefined;
+    const subtitle = if (document.notice) |err|
+        std.fmt.bufPrint(&buffer, "Not reloaded: {s}", .{switch (err) {
+            error.Unreadable => "the file does not exist or cannot be read",
+            error.TooLarge => "the file is larger than 4 MB",
+            error.NotText => "the file is not UTF-8 text",
+        }}) catch unreachable
+    else subtitle: {
+        const words_per_minute = 230;
+        const word_count = document.word_count;
+        const minutes = @max(1, (word_count + words_per_minute / 2) / words_per_minute);
+        break :subtitle std.fmt.bufPrint(
+            &buffer,
+            "{d} words · {d} min read",
+            .{ word_count, minutes },
+        ) catch unreachable;
     };
     objc.send(void, window, "setSubtitle:", .{cocoa.string(subtitle)});
-    document.notice = false;
 }
 
 /// Centers the text column in the pane. The pane can be wider than a readable line.
@@ -757,6 +756,8 @@ fn sidebar_create(document: *Document, controller: Id) Id {
     objc.send(void, table, "setFocusRingType:", .{focus_ring_none});
     objc.send(void, table, "setDataSource:", .{controller});
     objc.send(void, table, "setDelegate:", .{controller});
+    objc.send(void, table, "setTarget:", .{controller});
+    objc.send(void, table, "setAction:", .{objc.selector("outlineClicked:")});
     document.outline_view = table;
 
     const scroll_view = objc.new("NSScrollView");

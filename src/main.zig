@@ -137,6 +137,7 @@ fn controller_class() Id {
             .types = "v@:@",
             .implementation = &outline_selection_changed,
         },
+        .{ .name = "outlineClicked:", .types = "v@:@", .implementation = &outline_clicked },
         .{
             .name = "textView:clickedOnLink:atIndex:",
             .types = "B@:@@Q",
@@ -233,10 +234,13 @@ fn path_open(file_path: Id) void {
 }
 
 fn open_alert_show(file_path: Id, err: document.OpenError) void {
-    const name = objc.send(Id, file_path, "lastPathComponent", .{});
+    const name = cocoa.string_bytes(objc.send(Id, file_path, "lastPathComponent", .{}));
+    var name_size = @min(name.len, 256);
+    // Cut a long name at a character, not inside one.
+    while (name_size < name.len and name[name_size] & 0xC0 == 0x80) name_size -= 1;
     var buffer: [512]u8 = undefined;
     const message = std.fmt.bufPrint(&buffer, "“{s}” could not be opened.", .{
-        cocoa.string_bytes(name)[0..@min(cocoa.string_bytes(name).len, 256)],
+        name[0..name_size],
     }) catch unreachable;
     alert_show(message, switch (err) {
         error.TooManyDocuments => "Too many documents are open. Close a window and try again.",
@@ -510,6 +514,15 @@ fn outline_selection_changed(_: Id, _: Selector, notification: Id) callconv(.c) 
     const shown = document.find(.outline_view, table) orelse return;
     if (shown.outline_selecting) return;
     const row = objc.send(isize, table.?, "selectedRow", .{});
+    if (row < 0 or row >= shown.content.heading_count) return;
+    document.heading_click(shown, @intCast(row));
+}
+
+/// A click on the row that is already selected changes no selection, but still goes to the
+/// heading. The sidebar selects the current section on its own, so this is the common click.
+fn outline_clicked(_: Id, _: Selector, table: Id) callconv(.c) void {
+    const shown = document.find(.outline_view, table) orelse return;
+    const row = objc.send(isize, table, "clickedRow", .{});
     if (row < 0 or row >= shown.content.heading_count) return;
     document.heading_click(shown, @intCast(row));
 }
