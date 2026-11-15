@@ -58,6 +58,9 @@ fn controller_class() Id {
         },
         .{ .name = "openDocument:", .types = "v@:@", .implementation = &action_open },
         .{ .name = "openURLs:", .types = "v@:@", .implementation = &action_open_urls },
+        .{ .name = "openRecent:", .types = "v@:@", .implementation = &action_open_recent },
+        .{ .name = "clearRecent:", .types = "v@:@", .implementation = &action_clear_recent },
+        .{ .name = "menuNeedsUpdate:", .types = "v@:@", .implementation = &recent_menu_update },
         .{ .name = "draggingEntered:", .types = "Q@:@", .implementation = &drag_entered },
         .{ .name = "performDragOperation:", .types = "B@:@", .implementation = &drag_perform },
         .{ .name = "reloadDocument:", .types = "v@:@", .implementation = &action_reload },
@@ -272,11 +275,60 @@ fn action_zoom_reset(_: Id, _: Selector, _: ?Id) callconv(.c) void {
     document.zoom(.reset);
 }
 
+fn action_open_recent(_: Id, _: Selector, item: Id) callconv(.c) void {
+    const url = objc.send(?Id, item, "representedObject", .{}) orelse return;
+    if (objc.send(?Id, url, "path", .{})) |file_path| path_open(file_path);
+}
+
+fn action_clear_recent(_: Id, _: Selector, _: ?Id) callconv(.c) void {
+    objc.send(void, document_controller(), "clearRecentDocuments:", .{@as(?Id, null)});
+}
+
+fn document_controller() Id {
+    return objc.send(Id, objc.class("NSDocumentController"), "sharedDocumentController", .{});
+}
+
+fn recent_count() usize {
+    const urls = objc.send(Id, document_controller(), "recentDocumentURLs", .{});
+    return objc.send(usize, urls, "count", .{});
+}
+
 /// Document actions need a document. Opening a file is always possible.
 fn validate_item(_: Id, _: Selector, item: Id) callconv(.c) bool {
     const action = objc.send(?Selector, item, "action", .{});
     if (action == objc.selector("openDocument:")) return true;
+    if (action == objc.selector("openRecent:")) return true;
+    if (action == objc.selector("clearRecent:")) return recent_count() > 0;
     return document.current() != null;
+}
+
+/// Fills the Open Recent menu when it opens, newest document first.
+fn recent_menu_update(_: Id, _: Selector, menu: Id) callconv(.c) void {
+    objc.send(void, menu, "removeAllItems", .{});
+    const urls = objc.send(Id, document_controller(), "recentDocumentURLs", .{});
+    const count = objc.send(usize, urls, "count", .{});
+    for (0..count) |index| {
+        const url = objc.send(Id, urls, "objectAtIndex:", .{index});
+        const title = objc.send(?Id, url, "lastPathComponent", .{}) orelse continue;
+        const item = objc.send(Id, menu, "addItemWithTitle:action:keyEquivalent:", .{
+            title,
+            objc.selector("openRecent:"),
+            cocoa.string(""),
+        });
+        objc.send(void, item, "setTarget:", .{controller});
+        objc.send(void, item, "setRepresentedObject:", .{url});
+    }
+    if (count > 0) {
+        objc.send(void, menu, "addItem:", .{
+            objc.send(Id, objc.class("NSMenuItem"), "separatorItem", .{}),
+        });
+    }
+    const clear = objc.send(Id, menu, "addItemWithTitle:action:keyEquivalent:", .{
+        cocoa.string("Clear Menu"),
+        objc.selector("clearRecent:"),
+        cocoa.string(""),
+    });
+    objc.send(void, clear, "setTarget:", .{controller});
 }
 
 // Window, outline and text view delegates.
@@ -516,6 +568,22 @@ fn menu_add(bar: Id, title: []const u8, items: []const Item) Id {
     return menu;
 }
 
+/// Adds File > Open Recent. Its items are made when it opens, from the list of recent documents
+/// that `NSDocumentController` keeps.
+fn menu_recent_add(file_menu: Id) void {
+    const title = cocoa.string("Open Recent");
+    const menu = objc.autorelease(objc.send(Id, objc.alloc("NSMenu"), "initWithTitle:", .{title}));
+    objc.send(void, menu, "setDelegate:", .{controller});
+    const item = objc.autorelease(objc.send(
+        Id,
+        objc.alloc("NSMenuItem"),
+        "initWithTitle:action:keyEquivalent:",
+        .{ title, @as(?Selector, null), cocoa.string("") },
+    ));
+    objc.send(void, item, "setSubmenu:", .{menu});
+    objc.send(void, file_menu, "insertItem:atIndex:", .{ item, @as(isize, 1) });
+}
+
 /// Adds the Edit menu. It is separate from `menu_bar_create` to keep that function short.
 fn menu_edit_add(bar: Id) void {
     const command_shift = Modifiers.command | Modifiers.shift;
@@ -582,7 +650,7 @@ fn menu_bar_create() void {
         separator,
         .{ .title = "Quit mini-md-view", .action = "terminate:", .key = "q" },
     });
-    _ = menu_add(bar, "File", &.{
+    const file_menu = menu_add(bar, "File", &.{
         .{ .title = "Open…", .action = "openDocument:", .key = "o" },
         separator,
         .{ .title = "Close", .action = "performClose:", .key = "w" },
@@ -590,6 +658,7 @@ fn menu_bar_create() void {
         separator,
         .{ .title = "Print…", .action = "print:", .key = "p" },
     });
+    menu_recent_add(file_menu);
     menu_edit_add(bar);
     menu_view_add(bar);
     const window_menu = menu_add(bar, "Window", &.{

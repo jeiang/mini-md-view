@@ -146,8 +146,19 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     };
     show(document, null);
     watch_start(document);
+    recent_note(document);
     inset_update(document);
     objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
+}
+
+/// Adds the file to File > Open Recent.
+fn recent_note(document: *const Document) void {
+    const url = objc.send(Id, objc.class("NSURL"), "fileURLWithPath:", .{
+        cocoa.string(document.path()),
+    });
+    const class = objc.class("NSDocumentController");
+    const controller = objc.send(Id, class, "sharedDocumentController", .{});
+    objc.send(void, controller, "noteNewRecentDocumentURL:", .{url});
 }
 
 /// Releases the document's objects. The controller calls this when the window closes.
