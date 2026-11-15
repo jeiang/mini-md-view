@@ -10,13 +10,53 @@ const assert = std.debug.assert;
 const objc = @import("objc.zig");
 const cocoa = @import("cocoa.zig");
 const document = @import("document.zig");
+const history = @import("history.zig");
 const Id = objc.Id;
 const Selector = objc.Selector;
 
 const extensions = [_][]const u8{ "md", "markdown", "mdown", "mkd", "mdx", "txt" };
 
-const toolbar_zoom_out = "MiniMdViewZoomOut";
-const toolbar_zoom_in = "MiniMdViewZoomIn";
+const ToolbarButton = struct {
+    identifier: []const u8,
+    label: []const u8,
+    symbol: []const u8,
+    action: [:0]const u8,
+    /// The toolbar puts navigational items before the window title.
+    navigational: bool = false,
+};
+
+const toolbar_back: ToolbarButton = .{
+    .identifier = "MiniMdViewBack",
+    .label = "Back",
+    .symbol = "chevron.left",
+    .action = "goBack:",
+    .navigational = true,
+};
+const toolbar_forward: ToolbarButton = .{
+    .identifier = "MiniMdViewForward",
+    .label = "Forward",
+    .symbol = "chevron.right",
+    .action = "goForward:",
+    .navigational = true,
+};
+const toolbar_zoom_out: ToolbarButton = .{
+    .identifier = "MiniMdViewZoomOut",
+    .label = "Zoom Out",
+    .symbol = "textformat.size.smaller",
+    .action = "zoomOut:",
+};
+const toolbar_zoom_in: ToolbarButton = .{
+    .identifier = "MiniMdViewZoomIn",
+    .label = "Zoom In",
+    .symbol = "textformat.size.larger",
+    .action = "zoomIn:",
+};
+const toolbar_buttons = [_]ToolbarButton{
+    toolbar_back,
+    toolbar_forward,
+    toolbar_zoom_out,
+    toolbar_zoom_in,
+};
 
 var controller: Id = undefined;
 /// The command line or Finder named files to open, so the last session is not reopened.
@@ -77,6 +117,8 @@ fn controller_class() Id {
         .{ .name = "zoomIn:", .types = "v@:@", .implementation = &action_zoom_in },
         .{ .name = "zoomOut:", .types = "v@:@", .implementation = &action_zoom_out },
         .{ .name = "zoomReset:", .types = "v@:@", .implementation = &action_zoom_reset },
+        .{ .name = "goBack:", .types = "v@:@", .implementation = &action_go_back },
+        .{ .name = "goForward:", .types = "v@:@", .implementation = &action_go_forward },
         .{ .name = "validateMenuItem:", .types = "B@:@", .implementation = &validate_item },
         .{ .name = "validateToolbarItem:", .types = "B@:@", .implementation = &validate_item },
         .{ .name = "windowWillClose:", .types = "v@:@", .implementation = &window_will_close },
@@ -187,20 +229,22 @@ fn supports_secure_state(_: Id, _: Selector, _: ?Id) callconv(.c) bool {
 fn path_open(file_path: Id) void {
     const bytes = cocoa.string_bytes(file_path);
     if (bytes.len == 0) return;
-    document.open(bytes, controller) catch |err| {
-        const name = objc.send(Id, file_path, "lastPathComponent", .{});
-        var buffer: [512]u8 = undefined;
-        const message = std.fmt.bufPrint(&buffer, "“{s}” could not be opened.", .{
-            cocoa.string_bytes(name)[0..@min(cocoa.string_bytes(name).len, 256)],
-        }) catch unreachable;
-        alert_show(message, switch (err) {
-            error.TooManyDocuments => "Too many documents are open. Close a window and try again.",
-            error.PathTooLong => "The path of the file is too long.",
-            error.Unreadable => "The file does not exist or cannot be read.",
-            error.TooLarge => "The file is larger than 4 MB.",
-            error.NotText => "The file is not UTF-8 text.",
-        });
-    };
+    document.open(bytes, controller) catch |err| open_alert_show(file_path, err);
+}
+
+fn open_alert_show(file_path: Id, err: document.OpenError) void {
+    const name = objc.send(Id, file_path, "lastPathComponent", .{});
+    var buffer: [512]u8 = undefined;
+    const message = std.fmt.bufPrint(&buffer, "“{s}” could not be opened.", .{
+        cocoa.string_bytes(name)[0..@min(cocoa.string_bytes(name).len, 256)],
+    }) catch unreachable;
+    alert_show(message, switch (err) {
+        error.TooManyDocuments => "Too many documents are open. Close a window and try again.",
+        error.PathTooLong => "The path of the file is too long.",
+        error.Unreadable => "The file does not exist or cannot be read.",
+        error.TooLarge => "The file is larger than 4 MB.",
+        error.NotText => "The file is not UTF-8 text.",
+    });
 }
 
 fn alert_show(message: []const u8, information: []const u8) void {
@@ -303,6 +347,31 @@ fn action_zoom_reset(_: Id, _: Selector, _: ?Id) callconv(.c) void {
     document.zoom(.reset);
 }
 
+fn action_go_back(_: Id, _: Selector, sender: ?Id) callconv(.c) void {
+    history_go(sender, .back);
+}
+
+fn action_go_forward(_: Id, _: Selector, sender: ?Id) callconv(.c) void {
+    history_go(sender, .forward);
+}
+
+fn history_go(sender: ?Id, direction: history.Direction) void {
+    const shown = sender_document(sender) orelse return;
+    const file_path = document.history_peek(shown, direction) orelse return;
+    document.history_go(shown, direction) catch |err| {
+        open_alert_show(cocoa.string(file_path), err);
+    };
+}
+
+/// A toolbar button acts on the window of its toolbar, which need not be the key window. A menu
+/// item acts on the key window.
+fn sender_document(sender: ?Id) ?*document.Document {
+    const item = sender orelse return document.current();
+    const toolbar_item = objc.send(bool, item, "isKindOfClass:", .{objc.class("NSToolbarItem")});
+    if (!toolbar_item) return document.current();
+    return document.find_toolbar(objc.send(?Id, item, "toolbar", .{}));
+}
+
 fn action_open_recent(_: Id, _: Selector, item: Id) callconv(.c) void {
     const url = objc.send(?Id, item, "representedObject", .{}) orelse return;
     if (objc.send(?Id, url, "path", .{})) |file_path| path_open(file_path);
@@ -321,13 +390,19 @@ fn recent_count() usize {
     return objc.send(usize, urls, "count", .{});
 }
 
-/// Document actions need a document. Opening a file is always possible.
+/// Document actions need a document, and Back and Forward need a history entry to go to.
+/// Opening a file is always possible.
 fn validate_item(_: Id, _: Selector, item: Id) callconv(.c) bool {
     const action = objc.send(?Selector, item, "action", .{});
     if (action == objc.selector("openDocument:")) return true;
     if (action == objc.selector("openRecent:")) return true;
     if (action == objc.selector("clearRecent:")) return recent_count() > 0;
-    return document.current() != null;
+    const shown = sender_document(item) orelse return false;
+    if (action == objc.selector("goBack:")) return document.history_peek(shown, .back) != null;
+    if (action == objc.selector("goForward:")) {
+        return document.history_peek(shown, .forward) != null;
+    }
+    return true;
 }
 
 /// Fills the Open Recent menu when it opens, newest document first.
@@ -443,8 +518,8 @@ fn outline_selection_changed(_: Id, _: Selector, notification: Id) callconv(.c) 
 /// link must not be able to start an arbitrary URL handler.
 const schemes_allowed = [_][]const u8{ "http", "https", "mailto" };
 
-/// Links inside the document scroll to their heading, links to other Markdown files open in the
-/// viewer, and web and mail links go to the default application.
+/// Links inside the document scroll to their heading, links to other Markdown files show them in
+/// the same window, and web and mail links go to the default application.
 fn link_clicked(_: Id, _: Selector, text_view: ?Id, link: Id, _: usize) callconv(.c) bool {
     const shown = document.find(.text_view, text_view) orelse return false;
     const is_string = objc.send(bool, link, "isKindOfClass:", .{objc.class("NSString")});
@@ -452,7 +527,7 @@ fn link_clicked(_: Id, _: Selector, text_view: ?Id, link: Id, _: usize) callconv
     const destination = cocoa.string_bytes(link);
     if (destination.len == 0) return true;
     if (destination[0] == '#') {
-        _ = document.anchor_show(shown, destination[1..]);
+        document.fragment_follow(shown, destination[1..]);
         return true;
     }
     const scheme_end = std.mem.indexOfScalar(u8, destination, ':');
@@ -487,11 +562,13 @@ fn url_open(address: Id) void {
 }
 
 /// Follows a link to a local file, relative to the directory of the document. A Markdown file
-/// opens in the viewer. Any other file is shown in Finder and not opened: opening it would let
-/// a document run a script or an application with one click.
+/// replaces the document in the window. Any other file is shown in Finder and not opened:
+/// opening it would let a document run a script or an application with one click.
 fn file_link_open(shown: *document.Document, destination: []const u8) void {
     const path_end = std.mem.indexOfAny(u8, destination, "?#") orelse destination.len;
     if (path_end == 0) return;
+    const fragment_start = std.mem.indexOfScalar(u8, destination, '#');
+    const fragment = if (fragment_start) |start| destination[start + 1 ..] else "";
     const path_raw = cocoa.string(destination[0..path_end]);
     var file_path = objc.send(
         ?Id,
@@ -507,7 +584,11 @@ fn file_link_open(shown: *document.Document, destination: []const u8) void {
     file_path = objc.send(Id, file_path, "stringByStandardizingPath", .{});
     const extension = cocoa.string_bytes(objc.send(Id, file_path, "pathExtension", .{}));
     for (extensions) |known| {
-        if (std.ascii.eqlIgnoreCase(extension, known)) return path_open(file_path);
+        if (!std.ascii.eqlIgnoreCase(extension, known)) continue;
+        const bytes = cocoa.string_bytes(file_path);
+        if (bytes.len == 0) return;
+        document.navigate(shown, bytes, fragment) catch |err| open_alert_show(file_path, err);
+        return;
     }
     const workspace = objc.send(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     const url = objc.send(Id, objc.class("NSURL"), "fileURLWithPath:", .{file_path});
@@ -520,32 +601,33 @@ fn toolbar_identifiers(_: Id, _: Selector, _: ?Id) callconv(.c) Id {
     return cocoa.array(&.{
         cocoa.NSToolbarToggleSidebarItemIdentifier,
         cocoa.NSToolbarSidebarTrackingSeparatorItemIdentifier,
+        cocoa.string(toolbar_back.identifier),
+        cocoa.string(toolbar_forward.identifier),
         cocoa.NSToolbarFlexibleSpaceItemIdentifier,
-        cocoa.string(toolbar_zoom_out),
-        cocoa.string(toolbar_zoom_in),
+        cocoa.string(toolbar_zoom_out.identifier),
+        cocoa.string(toolbar_zoom_in.identifier),
     });
 }
 
 fn toolbar_item_create(_: Id, _: Selector, _: ?Id, identifier: Id, _: bool) callconv(.c) ?Id {
     const name = cocoa.string_bytes(identifier);
-    const zoom_in = std.mem.eql(u8, name, toolbar_zoom_in);
-    if (!zoom_in and !std.mem.eql(u8, name, toolbar_zoom_out)) return null;
+    const button = for (toolbar_buttons) |candidate| {
+        if (std.mem.eql(u8, name, candidate.identifier)) break candidate;
+    } else return null;
     const item = objc.autorelease(objc.send(
         Id,
         objc.alloc("NSToolbarItem"),
         "initWithItemIdentifier:",
         .{identifier},
     ));
-    const label = cocoa.string(if (zoom_in) "Zoom In" else "Zoom Out");
-    const symbol_name = if (zoom_in) "textformat.size.larger" else "textformat.size.smaller";
+    const label = cocoa.string(button.label);
     objc.send(void, item, "setLabel:", .{label});
     objc.send(void, item, "setToolTip:", .{label});
-    if (cocoa.symbol(symbol_name)) |image| objc.send(void, item, "setImage:", .{image});
+    if (cocoa.symbol(button.symbol)) |image| objc.send(void, item, "setImage:", .{image});
     objc.send(void, item, "setBordered:", .{true});
+    objc.send(void, item, "setNavigational:", .{button.navigational});
     objc.send(void, item, "setTarget:", .{controller});
-    objc.send(void, item, "setAction:", .{
-        if (zoom_in) objc.selector("zoomIn:") else objc.selector("zoomOut:"),
-    });
+    objc.send(void, item, "setAction:", .{objc.selector_dynamic(button.action)});
     return item;
 }
 
@@ -691,6 +773,10 @@ fn menu_bar_create() void {
     menu_recent_add(file_menu);
     menu_edit_add(bar);
     menu_view_add(bar);
+    _ = menu_add(bar, "Go", &.{
+        .{ .title = "Back", .action = "goBack:", .key = "[" },
+        .{ .title = "Forward", .action = "goForward:", .key = "]" },
+    });
     const window_menu = menu_add(bar, "Window", &.{
         .{ .title = "Minimize", .action = "performMiniaturize:", .key = "m" },
         .{ .title = "Zoom", .action = "performZoom:" },

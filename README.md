@@ -35,9 +35,11 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
 - Follows the system appearance and accent color.
 - Find, copy, print and zoom work on the whole document, diagrams included. The zoom applies to
   every window, and the viewer remembers it.
-- Links to headings scroll, links to other Markdown files open in mini-md-view, and web and mail
-  links go to the default application. A link to any other local file shows the file in Finder
-  and does not open it, so a document cannot run a script with one click.
+- Links to headings scroll, links to other Markdown files show them in the same window, and web
+  and mail links go to the default application. A link to any other local file shows the file in
+  Finder and does not open it, so a document cannot run a script with one click.
+- Back and Forward (Go menu, Command-[ and Command-], or the toolbar) return to the files and
+  scroll positions that a window showed. Each window keeps its last 32 steps.
 
 Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough and
 autolinks. Raw HTML is shown as text. Images load from local files only: mini-md-view never uses the

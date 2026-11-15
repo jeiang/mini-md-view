@@ -13,10 +13,10 @@ const objc = @import("objc.zig");
 const cocoa = @import("cocoa.zig");
 const markdown = @import("markdown.zig");
 const render = @import("render.zig");
+const history = @import("history.zig");
 const Id = objc.Id;
 
 pub const documents_max = 8;
-const path_size_max = 1024;
 const scratch_size = 8 * 1024 * 1024;
 const zoom_min = 0.6;
 const zoom_max = 3.0;
@@ -27,8 +27,8 @@ const heading_margin = 16;
 
 pub const Document = struct {
     open: bool,
-    path_buffer: [path_size_max]u8,
-    path_length: u32,
+    /// The files that the window showed. The current entry is the file that it shows.
+    history: history.History,
     window: Id,
     scroll_view: Id,
     text_view: Id,
@@ -57,7 +57,7 @@ pub const Document = struct {
 
     pub fn path(document: *const Document) []const u8 {
         assert(document.open);
-        return document.path_buffer[0..document.path_length];
+        return document.history.current_path();
     }
 };
 
@@ -119,7 +119,7 @@ pub fn current() ?*Document {
 /// Opens the file in a new window, or brings its window to the front when it is already open.
 pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     assert(file_path.len > 0);
-    if (file_path.len > path_size_max) return error.PathTooLong;
+    if (file_path.len > history.path_size_max) return error.PathTooLong;
     for (&documents) |*document| {
         if (document.open and std.mem.eql(u8, document.path(), file_path)) {
             objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
@@ -130,8 +130,8 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
         if (!candidate.open) break candidate;
     } else return error.TooManyDocuments;
 
-    @memcpy(document.path_buffer[0..file_path.len], file_path);
-    document.path_length = @intCast(file_path.len);
+    document.history.reset();
+    document.history.push(file_path);
     document.content.reset();
     document.stream = null;
     document.notice = false;
@@ -144,12 +144,78 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
         assert(!document.open);
         return err;
     };
-    show(document, null);
+    path_shown(document, null);
+    inset_update(document);
+    objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
+}
+
+/// Shows another file in the window and adds it to the history. Then scrolls to the heading that
+/// `fragment` names, if any. On error, the window is unchanged.
+pub fn navigate(document: *Document, file_path: []const u8, fragment: []const u8) OpenError!void {
+    assert(document.open);
+    assert(file_path.len > 0);
+    if (file_path.len > history.path_size_max) return error.PathTooLong;
+    const modified = try file_read(document, cocoa.string(file_path));
+    document.modified = modified;
+    document.history.current().scroll = scroll_get(document);
+    document.history.push(file_path);
+    const insets = objc.send(cocoa.EdgeInsets, document.scroll_view, "contentInsets", .{});
+    path_shown(document, -insets.top);
+    if (fragment.len > 0) _ = anchor_show(document, fragment);
+}
+
+/// Goes one step back or forward in the history, to the scroll position that the entry had. On
+/// error, the window is unchanged.
+pub fn history_go(document: *Document, direction: history.Direction) LoadError!void {
+    assert(document.open);
+    const target = document.history.peek(direction) orelse return;
+    const scroll = scroll_get(document);
+    if (std.mem.eql(u8, target.path(), document.path())) {
+        document.history.current().scroll = scroll;
+        document.history.move(direction);
+        scroll_set(document, target.scroll);
+        return;
+    }
+    document.modified = try file_read(document, cocoa.string(target.path()));
+    document.history.current().scroll = scroll;
+    document.history.move(direction);
+    path_shown(document, target.scroll);
+}
+
+/// The path of the history entry one step in the direction, or null when there is none.
+pub fn history_peek(document: *Document, direction: history.Direction) ?[]const u8 {
+    assert(document.open);
+    const entry = document.history.peek(direction) orelse return null;
+    return entry.path();
+}
+
+/// Scrolls to the heading that a `#fragment` link names, and adds the new position to the
+/// history.
+pub fn fragment_follow(document: *Document, fragment: []const u8) void {
+    assert(document.open);
+    const scroll = scroll_get(document);
+    if (!anchor_show(document, fragment)) return;
+    document.history.current().scroll = scroll;
+    document.history.push(document.path());
+}
+
+/// Shows the file of the current history entry from the kept bytes, and makes the watcher, the
+/// recent documents and the stored set follow it.
+fn path_shown(document: *Document, scroll: ?f64) void {
+    show(document, scroll);
     watch_start(document);
     recent_note(document);
     paths_store();
-    inset_update(document);
-    objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
+}
+
+/// The document whose window has the toolbar.
+pub fn find_toolbar(toolbar: ?Id) ?*Document {
+    const wanted = toolbar orelse return null;
+    for (&documents) |*document| {
+        if (!document.open) continue;
+        if (objc.send(?Id, document.window, "toolbar", .{}) == wanted) return document;
+    }
+    return null;
 }
 
 /// Adds the file to File > Open Recent.
