@@ -35,8 +35,16 @@ pub fn build(b: *std.Build) void {
     const bundle_exe = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = "MiniMdView.app/Contents/MacOS" } },
     });
+    // build.zig.zon holds the one version number.
+    const plist = std.mem.replaceOwned(
+        u8,
+        b.allocator,
+        @embedFile("assets/Info.plist"),
+        "@VERSION@",
+        @import("build.zig.zon").version,
+    ) catch @panic("OOM");
     const bundle_plist = b.addInstallFile(
-        b.path("assets/Info.plist"),
+        b.addWriteFiles().add("Info.plist", plist),
         "MiniMdView.app/Contents/Info.plist",
     );
     const bundle_icon = b.addInstallFile(
