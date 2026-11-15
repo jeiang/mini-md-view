@@ -1,7 +1,8 @@
 //! Markdown parser: source bytes to a flat stream of events.
 //!
 //! The parser handles the CommonMark block structure (containers and leaf blocks) plus the GFM
-//! tables, task lists, strikethrough and autolink extensions. HTML is not interpreted: it is
+//! tables, task lists, strikethrough, autolink and alert extensions, and YAML front matter. Of
+//! HTML it interprets only comments and a few tags (see `markdown_inline.zig`); all other HTML is
 //! passed through as text. The output is a flat, well-nested event stream instead of a tree, so
 //! that consumers iterate it with a small explicit stack and no recursion.
 //!
@@ -71,12 +72,14 @@ pub const Event = union(enum) {
     /// Payload is the link destination.
     link_start: []const u8,
     link_end,
-    /// Payload is the image source. The events up to `image_end` are the alternative text.
-    image_start: []const u8,
+    /// The events up to `image_end` are the alternative text.
+    image_start: Image,
     image_end,
 };
 
 pub const Definition = struct { label: []const u8, destination: []const u8 };
+/// The display size is in pixels, and zero where the source does not give it.
+pub const Image = struct { source: []const u8, width: u32 = 0, height: u32 = 0 };
 
 pub const Storage = struct {
     events: [events_max]Event,
@@ -106,6 +109,8 @@ const Leaf = union(enum) {
     fenced: struct { marker: u8, length: u32, indent: u32 },
     indented_code: struct { blank_count: u32 },
     table: struct { column_count: u8, aligns: [table_columns_max]Align },
+    /// An HTML comment block, which is not shown.
+    comment,
 };
 
 const Indent = struct { columns: u32, bytes: u32 };
@@ -328,6 +333,13 @@ const Parser = struct {
             if (matched_all) return parser.fenced_line(match.rest);
             parser.leaf_close();
         }
+        if (parser.leaf == .comment) {
+            if (matched_all) {
+                if (std.mem.indexOf(u8, match.rest, "-->") != null) parser.leaf_close();
+                return;
+            }
+            parser.leaf_close();
+        }
         const blank = is_blank(match.rest);
         if (!matched_all) {
             if (parser.leaf == .paragraph and !blank and !block_start_match(match.rest, false)) {
@@ -358,7 +370,7 @@ const Parser = struct {
             .paragraph, .table => parser.leaf_close(),
             .indented_code => |*code| code.blank_count += 1,
             .none => {},
-            .fenced => unreachable,
+            .fenced, .comment => unreachable,
         }
         for (parser.containers[0..parser.container_count]) |container| {
             if (container == .item and !parser.blank_pending) {
@@ -403,6 +415,11 @@ const Parser = struct {
                 return parser.leaf_close();
             }
             if (parser.table_open(content)) return;
+        }
+        if (parser.leaf == .none and std.mem.startsWith(u8, content, "<!--")) {
+            // The comment runs to the line that contains `-->`, which can be this one.
+            if (std.mem.indexOf(u8, content, "-->") == null) parser.leaf = .comment;
+            return;
         }
         if (atx_match(content)) |heading| {
             parser.leaf_close();
@@ -470,7 +487,7 @@ const Parser = struct {
 
     fn leaf_close(parser: *Parser) void {
         switch (parser.leaf) {
-            .none => {},
+            .none, .comment => {},
             .paragraph => |paragraph| {
                 parser.leaf = .none;
                 parser.paragraph_close(
@@ -509,7 +526,13 @@ const Parser = struct {
             text = text[4..];
         }
         parser.event_add(.paragraph_start);
+        const event_count_text = parser.event_count;
         parser.inlines_add(text);
+        // A paragraph that has only hidden HTML in it is not shown.
+        if (parser.event_count == event_count_text) {
+            parser.event_count -= 1;
+            return;
+        }
         parser.event_add(.paragraph_end);
     }
 
@@ -554,9 +577,14 @@ const Parser = struct {
     fn definitions_collect(parser: *Parser, source: []const u8) void {
         assert(parser.definition_count == 0);
         var fence_marker: u8 = 0;
+        var comment = false;
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |line| {
             if (parser.definition_count == definitions_max) break;
+            if (comment) {
+                comment = std.mem.indexOf(u8, line, "-->") == null;
+                continue;
+            }
             const indent = indent_of(line);
             if (indent.columns >= 4) continue;
             const content = line[indent.bytes..];
@@ -569,6 +597,10 @@ const Parser = struct {
                 continue;
             }
             if (fence_marker != 0) continue;
+            if (std.mem.startsWith(u8, content, "<!--")) {
+                comment = std.mem.indexOf(u8, content, "-->") == null;
+                continue;
+            }
             if (definition_match(std.mem.trimEnd(u8, content, " \t\r"))) |definition| {
                 parser.storage.definitions[parser.definition_count] = definition;
                 parser.definition_count += 1;

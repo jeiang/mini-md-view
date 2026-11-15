@@ -7,6 +7,10 @@
 //!
 //! The text is mutable: entities are decoded in place, which works because an entity is never
 //! shorter than its UTF-8 encoding.
+//!
+//! HTML is interpreted only for a small subset: comments are hidden, `<br>` is a line break,
+//! `<img>` is an image, `<a href>` is a link, and the wrapper tags `p`, `div`, `span`, `center`
+//! and `picture` are dropped. Any other tag is text.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -22,6 +26,10 @@ const marks_max = 4;
 const opener_distance_max = 1024;
 const code_span_size_max = 1 << 16;
 const entity_size_max = 32;
+const html_tag_size_max = 2048;
+
+/// HTML tags that are dropped, while their content stays.
+const html_wrappers = [_][]const u8{ "p", "div", "span", "center", "picture" };
 
 const Mark = enum(u8) { emphasis, strong, strike };
 
@@ -34,6 +42,8 @@ const Kind = enum(u8) {
     /// `[` or `![` that has not found its closing bracket yet.
     link_open,
     image_open,
+    /// `<a href>` that has not found its `</a>` yet.
+    anchor_open,
     link_start,
     link_end,
     image_start,
@@ -48,6 +58,9 @@ pub const Token = struct {
     start: u32,
     end: u32,
     destination: []const u8 = "",
+    /// Images only: the display size in pixels, or zero when the source does not give it.
+    width: u32 = 0,
+    height: u32 = 0,
     /// Delimiters only: the delimiter character, and how many are not yet matched.
     marker: u8 = 0,
     count: u8 = 0,
@@ -390,24 +403,14 @@ const Scanner = struct {
 
     fn scan_angle(scanner: *Scanner) void {
         const rest_bytes = scanner.rest();
-        for ([_][]const u8{ "<br>", "<br/>", "<br />" }) |tag| {
-            const matches = rest_bytes.len >= tag.len and
-                std.ascii.eqlIgnoreCase(rest_bytes[0..tag.len], tag);
-            if (matches) {
-                scanner.run_flush(scanner.position);
-                scanner.token_add(.{
-                    .kind = .hard_break,
-                    .start = scanner.position,
-                    .end = scanner.position,
-                });
-                return scanner.advance_to(scanner.position + @as(u32, @intCast(tag.len)));
-            }
-        }
         if (std.mem.startsWith(u8, rest_bytes, "<!--")) {
             if (std.mem.indexOf(u8, rest_bytes, "-->")) |close| {
                 scanner.run_flush(scanner.position);
                 return scanner.advance_to(scanner.position + @as(u32, @intCast(close + 3)));
             }
+        }
+        if (tag_parse(rest_bytes)) |tag| {
+            if (scanner.scan_tag(&tag)) return;
         }
         const close = std.mem.indexOfAny(u8, rest_bytes, "> \t\n") orelse rest_bytes.len;
         const closed = close < rest_bytes.len and rest_bytes[close] == '>';
@@ -424,6 +427,106 @@ const Scanner = struct {
         const end = scanner.position + @as(u32, @intCast(close));
         scanner.link_add(scanner.position, start, end);
         scanner.advance_to(end + 1);
+    }
+
+    /// Handles a tag of the HTML subset. Returns false for any other tag, which stays text.
+    fn scan_tag(scanner: *Scanner, tag: *const Tag) bool {
+        const start = scanner.position;
+        const end = start + tag.size;
+        assert(end <= scanner.text.len);
+        if (std.ascii.eqlIgnoreCase(tag.name, "br")) {
+            if (tag.closing or tag.attribute_count > 0) return false;
+            scanner.run_flush(start);
+            scanner.token_add(.{ .kind = .hard_break, .start = start, .end = start });
+        } else if (std.ascii.eqlIgnoreCase(tag.name, "img")) {
+            if (tag.closing) return false;
+            const source = tag.source orelse return false;
+            if (source.len == 0) return false;
+            scanner.run_flush(start);
+            scanner.token_add(.{
+                .kind = .image_start,
+                .start = start,
+                .end = start,
+                .destination = source,
+                .width = tag.width,
+                .height = tag.height,
+            });
+            if (tag.alternative.len > 0) {
+                const offset: u32 = @intCast(
+                    @intFromPtr(tag.alternative.ptr) - @intFromPtr(scanner.text.ptr),
+                );
+                const alternative_end = offset + @as(u32, @intCast(tag.alternative.len));
+                scanner.token_add(.{ .kind = .text, .start = offset, .end = alternative_end });
+            }
+            scanner.token_add(.{ .kind = .image_end, .start = end, .end = end });
+        } else if (std.ascii.eqlIgnoreCase(tag.name, "a")) {
+            if (tag.closing) return scanner.anchor_close(end);
+            const href = tag.href orelse return false;
+            scanner.run_flush(start);
+            scanner.token_add(.{
+                .kind = .anchor_open,
+                .start = start,
+                .end = end,
+                .destination = href,
+            });
+        } else {
+            for (html_wrappers) |name| {
+                if (std.ascii.eqlIgnoreCase(tag.name, name)) break;
+            } else return false;
+            return scanner.wrapper_drop(end);
+        }
+        scanner.advance_to(end);
+        return true;
+    }
+
+    /// Drops a wrapper tag. A tag on a line of its own takes one line break with it, so that
+    /// it leaves no space behind.
+    fn wrapper_drop(scanner: *Scanner, end: u32) bool {
+        const start = scanner.position;
+        const previous: ?*Token = if (scanner.token_count > 0)
+            &scanner.tokens[scanner.token_count - 1]
+        else
+            null;
+        const break_before = previous != null and previous.?.kind == .soft_break;
+        const line_start = scanner.run_start == start and (start == 0 or break_before);
+        scanner.run_flush(start);
+        if (line_start and scanner.byte_at(end) == '\n') {
+            var next = end + 1;
+            while (scanner.byte_at(next) == ' ' or scanner.byte_at(next) == '\t') next += 1;
+            scanner.advance_to(next);
+            return true;
+        }
+        if (line_start and end == scanner.text.len and break_before) previous.?.kind = .skip;
+        scanner.advance_to(end);
+        return true;
+    }
+
+    /// Pairs `</a>` with the nearest open `<a href>`, as a closing bracket pairs with its opener.
+    fn anchor_close(scanner: *Scanner, end: u32) bool {
+        const opener_index = scanner.anchor_opener_find() orelse return false;
+        scanner.run_flush(scanner.position);
+        const inner = scanner.tokens[opener_index + 1 .. scanner.token_count];
+        emphasis_process(inner);
+        for (inner) |*token| {
+            token.active = false;
+            if (token.kind == .link_start or token.kind == .link_end) token.kind = .skip;
+        }
+        scanner.tokens[opener_index].kind = .link_start;
+        const position = scanner.position;
+        scanner.token_add(.{ .kind = .link_end, .start = position, .end = position });
+        scanner.advance_to(end);
+        return true;
+    }
+
+    fn anchor_opener_find(scanner: *const Scanner) ?u32 {
+        const index_min = scanner.token_count -| opener_distance_max;
+        var index = scanner.token_count;
+        while (index > index_min) {
+            index -= 1;
+            const token = &scanner.tokens[index];
+            if (token.kind == .anchor_open and token.active) return index;
+        }
+        return null;
     }
 
     /// Adds a link whose text is its own destination.
@@ -542,6 +645,96 @@ fn entity_decode(name: []const u8, buffer: *[4]u8) ?[]const u8 {
     return buffer[0..length];
 }
 
+const Tag = struct {
+    name: []const u8,
+    closing: bool,
+    /// Bytes from `<` to `>`.
+    size: u32 = 0,
+    attribute_count: u32 = 0,
+    source: ?[]const u8 = null,
+    alternative: []const u8 = "",
+    href: ?[]const u8 = null,
+    width: u32 = 0,
+    height: u32 = 0,
+};
+
+/// Parses a well-formed HTML tag at the start of the bytes. Attribute values are not decoded,
+/// as link destinations are not.
+fn tag_parse(bytes: []const u8) ?Tag {
+    const window = bytes[0..@min(bytes.len, html_tag_size_max)];
+    if (window.len < 3 or window[0] != '<') return null;
+    var cursor: u32 = 1;
+    const closing = window[cursor] == '/';
+    cursor += @intFromBool(closing);
+    const name_start = cursor;
+    if (!std.ascii.isAlphabetic(window[name_start])) return null;
+    while (cursor < window.len and std.ascii.isAlphanumeric(window[cursor])) cursor += 1;
+    var tag: Tag = .{ .name = window[name_start..cursor], .closing = closing };
+    while (cursor < window.len) {
+        const space_start = cursor;
+        cursor = whitespace_skip(window, cursor);
+        if (cursor == window.len) return null;
+        if (window[cursor] == '>') {
+            tag.size = cursor + 1;
+            return tag;
+        }
+        if (window[cursor] == '/' and !closing) {
+            if (cursor + 1 == window.len or window[cursor + 1] != '>') return null;
+            tag.size = cursor + 2;
+            return tag;
+        }
+        // An attribute follows white space, and a closing tag has none.
+        if (closing or cursor == space_start) return null;
+        const attribute_start = cursor;
+        const first = window[cursor];
+        if (!std.ascii.isAlphabetic(first) and first != '_' and first != ':') return null;
+        while (cursor < window.len) : (cursor += 1) {
+            const byte = window[cursor];
+            const name_byte = std.ascii.isAlphanumeric(byte) or
+                std.mem.indexOfScalar(u8, "_.:-", byte) != null;
+            if (!name_byte) break;
+        }
+        const name = window[attribute_start..cursor];
+        var value: []const u8 = "";
+        const equals = whitespace_skip(window, cursor);
+        if (equals < window.len and window[equals] == '=') {
+            cursor = whitespace_skip(window, equals + 1);
+            if (cursor == window.len) return null;
+            const quote = window[cursor];
+            if (quote == '"' or quote == '\'') {
+                const close = std.mem.indexOfScalarPos(u8, window, cursor + 1, quote) orelse {
+                    return null;
+                };
+                value = window[cursor + 1 .. close];
+                cursor = @intCast(close + 1);
+            } else {
+                const value_start = cursor;
+                while (cursor < window.len) : (cursor += 1) {
+                    if (std.mem.indexOfScalar(u8, " \t\n\r\"'=<>`", window[cursor]) != null) break;
+                }
+                if (cursor == value_start) return null;
+                value = window[value_start..cursor];
+            }
+        }
+        tag.attribute_count += 1;
+        if (std.ascii.eqlIgnoreCase(name, "src")) tag.source = value;
+        if (std.ascii.eqlIgnoreCase(name, "alt")) tag.alternative = value;
+        if (std.ascii.eqlIgnoreCase(name, "href")) tag.href = value;
+        if (std.ascii.eqlIgnoreCase(name, "width")) tag.width = pixels_parse(value);
+        if (std.ascii.eqlIgnoreCase(name, "height")) tag.height = pixels_parse(value);
+    }
+    return null;
+}
+
+/// A size in pixels from an attribute value of digits only. Zero for other units or no value.
+fn pixels_parse(value: []const u8) u32 {
+    if (value.len == 0 or value.len > 5) return 0;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) return 0;
+    }
+    return std.fmt.parseInt(u32, value, 10) catch unreachable;
+}
+
 /// Matches closing delimiters with openers, as CommonMark's "process emphasis" does. Each match
 /// is recorded on both runs. Runs inside a matched pair are deactivated, which keeps the
 /// resulting spans well nested.
@@ -623,13 +816,17 @@ const Emitter = struct {
     fn token_emit(emitter: *Emitter, token: *const Token) void {
         const bytes = emitter.text[token.start..token.end];
         switch (token.kind) {
-            .text, .link_open, .image_open => emitter.text_add(bytes),
+            .text, .link_open, .image_open, .anchor_open => emitter.text_add(bytes),
             .code => emitter.add(.{ .code = bytes }),
             .soft_break => emitter.add(.soft_break),
             .hard_break => emitter.add(.hard_break),
             .link_start => emitter.add(.{ .link_start = token.destination }),
             .link_end => emitter.add(.link_end),
-            .image_start => emitter.add(.{ .image_start = token.destination }),
+            .image_start => emitter.add(.{ .image_start = .{
+                .source = token.destination,
+                .width = token.width,
+                .height = token.height,
+            } }),
             .image_end => emitter.add(.image_end),
             .skip => {},
             .delimiter => {

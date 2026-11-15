@@ -66,7 +66,10 @@ fn print(events: []const markdown.Event) []const u8 {
         .strike_end => output.add("</s>", .{}),
         .link_start => |destination| output.add("<a {s}>", .{destination}),
         .link_end => output.add("</a>", .{}),
-        .image_start => |destination| output.add("<img {s}>", .{destination}),
+        .image_start => |image| if (image.width > 0 or image.height > 0)
+            output.add("<img {s} {d}x{d}>", .{ image.source, image.width, image.height })
+        else
+            output.add("<img {s}>", .{image.source}),
         .image_end => output.add("</img>", .{}),
     };
     return output_buffer[0..output.count];
@@ -149,6 +152,66 @@ test "markdown: tables" {
     try expect("a | b\n---", "<h2>a | b</h>");
 }
 
+test "markdown: HTML comments" {
+    try expect("a <!-- hidden --> b", "<p>a  b</p>");
+    try expect("a <!-- one\ntwo --> b", "<p>a  b</p>");
+    try expect("a\n\n<!--\nhidden\n\n[r]: <u>\nhidden -->\nb [r]", "<p>a</p><p>b [r]</p>");
+    try expect("<!-- one line --> rest\nb", "<p>b</p>");
+    try expect("a\n<!-- in paragraph -->\nb", "<p>a<soft><soft>b</p>");
+    try expect("a\n\n<!-- open\n\n# hidden", "<p>a</p>");
+    try expect("> <!--\n> x\n\ny", "<quote></quote><p>y</p>");
+    try expect("a <!-- open", "<p>a <!-- open</p>");
+    try expect("`<!-- x -->`", "<p><code><!-- x --></code></p>");
+    try expect("```\n<!--\n```\nb", "<pre ><!--|</pre><p>b</p>");
+    const result = markdown.parse(&storage, "<!--\nmany words here\n-->\none two");
+    try std.testing.expectEqual(2, result.word_count);
+}
+
+test "markdown: HTML tags" {
+    try expect("a<br>b<br/>c<BR />d", "<p>a<br>b<br>c<br>d</p>");
+    try expect("a<br x>b</br>", "<p>a<br x>b</br></p>");
+    try expect(
+        "<img src=\"a.png\" alt=\"A b\"> <IMG SRC='b c.png' width=96> " ++
+            "<img src=d.png height=\"20\">",
+        "<p><img a.png>A b</img> <img b c.png 96x0></img> <img d.png 0x20></img></p>",
+    );
+    try expect(
+        "<img src=\"a.png\" width=\"50%\" height=\"10em\"/> <img alt=\"x\"> <img src=\"\">",
+        "<p><img a.png></img> <img alt=\"x\"> <img src=\"\"></p>",
+    );
+    try expect("<img\nsrc=\"a.png\"\nwidth=8 height=9>", "<p><img a.png 8x9></img></p>");
+    try expect("<img src=\"a.png\" alt=\"x>", "<p><img src=\"a.png\" alt=\"x></p>");
+    try expect(
+        "<a href=\"http://x\">link *em*</a> end",
+        "<p><a http://x>link <em>em</em></a> end</p>",
+    );
+    try expect("<A HREF='#t'>t</A>", "<p><a #t>t</a></p>");
+    try expect("<a href=\"x\">open", "<p><a href=\"x\">open</p>");
+    try expect("close</a>", "<p>close</a></p>");
+    try expect("<a name=\"x\">t</a>", "<p><a name=\"x\">t</a></p>");
+    try expect("<a href=x>a\n\nb</a>", "<p><a href=x>a</p><p>b</a></p>");
+    try expect("*a <a href=x>b* c</a>", "<p>*a <a x>b* c</a></p>");
+    try expect("[a <a href=x>b](u) c</a>", "<p><a u>a <a href=x>b</a> c</a></p>");
+    try expect("<a href=x>[a](u)</a>", "<p><a x>a</a></p>");
+    try expect("<a href=x><img src=i.png></a>", "<p><a x><img i.png></img></a></p>");
+    try expect(
+        "<p align=\"center\">\n  <img src=\"icon.png\" width=\"96\">\n</p>",
+        "<p><img icon.png 96x0></img></p>",
+    );
+    try expect("<div align=\"center\">\n\n# T\n\n</div>", "<h1>T</h>");
+    try expect("a <span class=x>*b*</span> <center>c</center>", "<p>a <em>b</em> c</p>");
+    try expect("a\n<div>\nb", "<p>a<soft>b</p>");
+    try expect("<picture><img src=p.png></picture>", "<p><img p.png></img></p>");
+    try expect("<details><summary>s</summary>", "<p><details><summary>s</summary></p>");
+    try expect("<span", "<p><span</p>");
+    try expect("<span x=\"1\"y>a", "<p><span x=\"1\"y>a</p>");
+    try expect(
+        "`<br><img src=a> <a href=b>c</a>`",
+        "<p><code><br><img src=a> <a href=b>c</a></code></p>",
+    );
+    try expect("```\n<img src=a>\n<p>\n```", "<pre ><img src=a>|<p>|</pre>");
+}
+
 test "markdown: alerts" {
     try expect("> [!NOTE]\n> Body *x*.", "<quote note><p>Body <em>x</em>.</p></quote>");
     try expect("> [!tip]  \n> a", "<quote tip><p>a</p></quote>");
@@ -165,7 +228,10 @@ test "markdown: alerts" {
 }
 
 test "markdown: front matter" {
-    try expect("---\ntitle: A\ntags: [x]\n---\n# T", "<pre yaml>title: A|tags: [x]|</pre><h1>T</h>");
+    try expect(
+        "---\ntitle: A\ntags: [x]\n---\n# T",
+        "<pre yaml>title: A|tags: [x]|</pre><h1>T</h>",
+    );
     try expect("---\r\na: 1\r\n...\r\nb", "<pre yaml>a: 1|</pre><p>b</p>");
     try expect("---\n---\nb", "<pre yaml></pre><p>b</p>");
     try expect("---\na: 1\n\nb", "<hr><p>a: 1</p><p>b</p>");

@@ -34,8 +34,11 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
   links go to the default application. A link to any other local file shows the file in Finder
   and does not open it, so a document cannot run a script with one click.
 
-Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough and
-autolinks. Raw HTML is shown as text. Images load from local files only: mini-md-view never uses the
+Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough, autolinks
+and alerts, and YAML front matter. Of raw HTML, comments are hidden, `<br>`, `<img>` (with
+`width` and `height`) and `<a href>` work, and the tags `p`, `div`, `span`, `center` and
+`picture` are dropped but keep their content. Other HTML is shown as text.
+Images load from local files only: mini-md-view never uses the
 network.
 
 Mermaid: `flowchart`/`graph`, `sequenceDiagram`, `stateDiagram`, `classDiagram`, `erDiagram`,

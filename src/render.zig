@@ -1038,7 +1038,7 @@ fn inline_apply(builder: *Builder, event: markdown.Event) void {
         .strike_end => builder.strike_depth -= 1,
         .link_start => |destination| builder.link = cocoa.string(destination),
         .link_end => builder.link = null,
-        .image_start => |source| image_begin(builder, source),
+        .image_start => |image| image_begin(builder, image),
         .image_end => if (builder.image_link) {
             builder.image_link = false;
             builder.link = null;
@@ -1047,7 +1047,8 @@ fn inline_apply(builder: *Builder, event: markdown.Event) void {
     }
 }
 
-fn image_begin(builder: *Builder, source: []const u8) void {
+fn image_begin(builder: *Builder, image_event: markdown.Image) void {
+    const source = image_event.source;
     const image = image_load(builder, source) orelse {
         // Show the alternative text instead, as a link to the image when it has no link yet.
         if (builder.link == null) {
@@ -1056,7 +1057,19 @@ fn image_begin(builder: *Builder, source: []const u8) void {
         }
         return;
     };
-    const size = objc.send(cocoa.Size, image, "size", .{});
+    const natural = objc.send(cocoa.Size, image, "size", .{});
+    assert(natural.width >= 1 and natural.height >= 1);
+    const width: f64 = @floatFromInt(image_event.width);
+    const height: f64 = @floatFromInt(image_event.height);
+    // With one dimension given, the other keeps the aspect ratio.
+    const size: cocoa.Size = if (width > 0 and height > 0)
+        .{ .width = width, .height = height }
+    else if (width > 0)
+        .{ .width = width, .height = natural.height * width / natural.width }
+    else if (height > 0)
+        .{ .width = natural.width * height / natural.height, .height = height }
+    else
+        natural;
     const scale = @min(1, builder.scaled(column_width - 80) / size.width);
     const attachment = objc.new("NSTextAttachment");
     objc.send(void, attachment, "setImage:", .{image});
