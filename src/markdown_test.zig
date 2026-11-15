@@ -112,6 +112,8 @@ test "markdown: lists" {
         "<li done><p>done</p></li></list>");
     try expect("- a\nlazy\n\npara", "<ul1><li><p>a<soft>lazy</p></li></list><p>para</p>");
     try expect("- a\n+ b", "<ul1><li><p>a</p></li></list><ul1><li><p>b</p></li></list>");
+    try expect("- a\n\n1. b\n2. c", "<ul1><li><p>a</p></li></list>" ++
+        "<ol1><li><p>b</p></li><li><p>c</p></li></list>");
     try expect("text\n- item", "<p>text</p><ul1><li><p>item</p></li></list>");
     try expect("text\n2. not a list", "<p>text<soft>2. not a list</p>");
 }

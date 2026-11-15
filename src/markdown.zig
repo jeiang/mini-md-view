@@ -134,6 +134,8 @@ const Parser = struct {
     leaf: Leaf = .none,
     /// A blank line was seen inside a list. The next block decides whether that list is loose.
     blank_pending: bool = false,
+    /// The event count at that blank line. Lists that were opened later are not affected.
+    blank_event_count: u32 = 0,
 
     fn event_add(parser: *Parser, event: Event) void {
         assert(parser.event_count < events_max);
@@ -304,6 +306,7 @@ const Parser = struct {
             index -= 1;
             switch (parser.containers[index]) {
                 .list => |list| {
+                    if (list.event_index >= parser.blank_event_count) return;
                     parser.storage.events[list.event_index].list_start.tight = false;
                     return;
                 },
@@ -344,7 +347,10 @@ const Parser = struct {
             .fenced => unreachable,
         }
         for (parser.containers[0..parser.container_count]) |container| {
-            if (container == .item) parser.blank_pending = true;
+            if (container == .item and !parser.blank_pending) {
+                parser.blank_pending = true;
+                parser.blank_event_count = parser.event_count;
+            }
         }
     }
 

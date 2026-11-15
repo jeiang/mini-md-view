@@ -1,0 +1,493 @@
+//! Documents: a fixed pool of open files, each with its own window.
+//!
+//! A document window is a split view. The sidebar lists the headings, and the content pane is
+//! one read-only text view. The window uses the standard toolbar and sidebar, which is all that
+//! the system needs to give it the current macOS design, such as Liquid Glass.
+//!
+//! All memory is static. The pool bounds how many documents can be open, and the parser and
+//! diagram workspaces are shared, because documents are loaded one at a time on the main thread.
+
+const std = @import("std");
+const assert = std.debug.assert;
+const objc = @import("objc.zig");
+const cocoa = @import("cocoa.zig");
+const markdown = @import("markdown.zig");
+const render = @import("render.zig");
+const Id = objc.Id;
+
+pub const documents_max = 8;
+const path_size_max = 1024;
+const scratch_size = 8 * 1024 * 1024;
+const zoom_min = 0.6;
+const zoom_max = 3.0;
+const zoom_step = 1.1;
+const inset_min = 28;
+
+pub const Document = struct {
+    open: bool,
+    path_buffer: [path_size_max]u8,
+    path_length: u32,
+    window: Id,
+    scroll_view: Id,
+    text_view: Id,
+    /// Owns the text system: the layout manager, the container, and through them the text.
+    text_storage: Id,
+    outline_view: Id,
+    zoom: f64,
+    /// Modification time of the file when it was last loaded, in seconds.
+    modified: f64,
+    /// Smallest heading level in the document, which the outline shows without indentation.
+    heading_level_min: u8,
+    content: render.Content,
+
+    pub fn path(document: *const Document) []const u8 {
+        assert(document.open);
+        return document.path_buffer[0..document.path_length];
+    }
+};
+
+pub const OpenError = error{
+    /// Every slot of the document pool is in use.
+    TooManyDocuments,
+    PathTooLong,
+} || LoadError;
+
+pub const LoadError = error{
+    Unreadable,
+    TooLarge,
+    /// The file is not valid UTF-8.
+    NotText,
+};
+
+var documents: [documents_max]Document = undefined;
+var parse_storage: markdown.Storage = undefined;
+var scratch: [scratch_size]u8 align(16) = undefined;
+
+pub fn init() void {
+    for (&documents) |*document| document.open = false;
+}
+
+pub fn open_count() u32 {
+    var count: u32 = 0;
+    for (&documents) |*document| count += @intFromBool(document.open);
+    return count;
+}
+
+const Field = enum { window, scroll_view, text_view, outline_view };
+
+/// Finds the open document that owns the given AppKit object.
+pub fn find(comptime field: Field, object: ?Id) ?*Document {
+    const wanted = object orelse return null;
+    for (&documents) |*document| {
+        if (document.open and @field(document, @tagName(field)) == wanted) return document;
+    }
+    return null;
+}
+
+/// The document of the window that has the user's focus.
+pub fn current() ?*Document {
+    const app = objc.send(Id, objc.class("NSApplication"), "sharedApplication", .{});
+    const window = objc.send(?Id, app, "keyWindow", .{}) orelse
+        objc.send(?Id, app, "mainWindow", .{});
+    return find(.window, window);
+}
+
+/// Opens the file in a new window, or brings its window to the front when it is already open.
+pub fn open(file_path: []const u8, controller: Id) OpenError!void {
+    assert(file_path.len > 0);
+    if (file_path.len > path_size_max) return error.PathTooLong;
+    for (&documents) |*document| {
+        if (document.open and std.mem.eql(u8, document.path(), file_path)) {
+            objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
+            return;
+        }
+    }
+    const document = for (&documents) |*candidate| {
+        if (!candidate.open) break candidate;
+    } else return error.TooManyDocuments;
+
+    @memcpy(document.path_buffer[0..file_path.len], file_path);
+    document.path_length = @intCast(file_path.len);
+    document.zoom = 1;
+    document.modified = 0;
+    document.content.reset();
+    window_create(document, controller);
+    document.open = true;
+    load(document) catch |err| {
+        objc.send(void, document.window, "close", .{});
+        assert(!document.open);
+        return err;
+    };
+    inset_update(document);
+    objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
+}
+
+/// Releases the document's objects. The controller calls this when the window closes.
+pub fn close(document: *Document) void {
+    assert(document.open);
+    document.open = false;
+    const center = objc.send(Id, objc.class("NSNotificationCenter"), "defaultCenter", .{});
+    const controller = objc.send(?Id, document.window, "delegate", .{});
+    if (controller) |observer| {
+        objc.send(void, center, "removeObserver:name:object:", .{
+            observer,
+            cocoa.NSViewFrameDidChangeNotification,
+            document.scroll_view,
+        });
+    }
+    objc.send(void, document.window, "setDelegate:", .{@as(?Id, null)});
+    objc.send(void, document.outline_view, "setDelegate:", .{@as(?Id, null)});
+    objc.send(void, document.outline_view, "setDataSource:", .{@as(?Id, null)});
+    objc.send(void, document.text_view, "setDelegate:", .{@as(?Id, null)});
+    // Diagram attachments point into the document's content. Drop them before the slot is reused.
+    const empty = objc.new("NSAttributedString");
+    objc.send(void, document.text_storage, "setAttributedString:", .{empty});
+    objc.release(document.outline_view);
+    objc.release(document.text_view);
+    objc.release(document.scroll_view);
+    objc.release(document.text_storage);
+    _ = objc.autorelease(document.window);
+}
+
+fn file_modified(file_path: Id) ?f64 {
+    const manager = objc.send(Id, objc.class("NSFileManager"), "defaultManager", .{});
+    const attributes = objc.send(
+        ?Id,
+        manager,
+        "attributesOfItemAtPath:error:",
+        .{ file_path, @as(?*?Id, null) },
+    ) orelse return null;
+    const date = objc.send(?Id, attributes, "fileModificationDate", .{}) orelse return null;
+    return objc.send(f64, date, "timeIntervalSinceReferenceDate", .{});
+}
+
+/// Reloads the document when its file changed on disk. A file that cannot be read right now,
+/// for example in the middle of an editor's save, leaves the current view in place.
+pub fn refresh(document: *Document) void {
+    assert(document.open);
+    const modified = file_modified(cocoa.string(document.path())) orelse return;
+    if (modified == document.modified) return;
+    load(document) catch {};
+}
+
+pub fn refresh_all() void {
+    for (&documents) |*document| {
+        if (document.open) refresh(document);
+    }
+}
+
+pub fn reload(document: *Document) LoadError!void {
+    assert(document.open);
+    try load(document);
+}
+
+pub const ZoomChange = enum { in, out, reset };
+
+pub fn zoom(document: *Document, change: ZoomChange) void {
+    assert(document.open);
+    const zoom_new = switch (change) {
+        .in => @min(zoom_max, document.zoom * zoom_step),
+        .out => @max(zoom_min, document.zoom / zoom_step),
+        .reset => 1,
+    };
+    if (zoom_new == document.zoom) return;
+    const zoom_old = document.zoom;
+    document.zoom = zoom_new;
+    load(document) catch {
+        document.zoom = zoom_old;
+        return;
+    };
+    inset_update(document);
+}
+
+/// Reads, parses and renders the file, and shows the result. On error, the view is unchanged.
+fn load(document: *Document) LoadError!void {
+    assert(document.open);
+    const file_path = cocoa.string(document.path());
+    const modified = file_modified(file_path) orelse return error.Unreadable;
+    const data = objc.send(?Id, objc.class("NSData"), "dataWithContentsOfFile:", .{file_path}) orelse {
+        return error.Unreadable;
+    };
+    const size = objc.send(usize, data, "length", .{});
+    if (size > markdown.source_size_max) return error.TooLarge;
+    var source: []const u8 = "";
+    if (size > 0) source = objc.send([*]const u8, data, "bytes", .{})[0..size];
+    if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) source = source[3..];
+    if (!std.unicode.utf8ValidateSlice(source)) return error.NotText;
+
+    const clip_view = objc.send(Id, document.scroll_view, "contentView", .{});
+    const scroll_origin = objc.send(cocoa.Rect, clip_view, "bounds", .{}).origin;
+    const first_load = document.modified == 0;
+
+    // The old attributed string points into `content`, so it goes away before the rebuild.
+    const empty = objc.new("NSAttributedString");
+    objc.send(void, document.text_storage, "setAttributedString:", .{empty});
+    const parsed = markdown.parse(&parse_storage, source);
+    const attributed = render.build(parsed.events, &document.content, .{
+        .zoom = document.zoom,
+        .directory = objc.send(Id, file_path, "stringByDeletingLastPathComponent", .{}),
+        .scratch = &scratch,
+        .truncated = parsed.truncated,
+    });
+    objc.send(void, document.text_storage, "setAttributedString:", .{attributed});
+    document.modified = modified;
+
+    document.heading_level_min = 6;
+    for (document.content.headings_slice()) |heading| {
+        document.heading_level_min = @min(document.heading_level_min, heading.level);
+    }
+    objc.send(void, document.outline_view, "reloadData", .{});
+    title_update(document, file_path, parsed.word_count);
+    if (!first_load) {
+        const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
+        const container = objc.send(Id, document.text_view, "textContainer", .{});
+        objc.send(void, layout_manager, "ensureLayoutForTextContainer:", .{container});
+        objc.send(void, document.text_view, "scrollPoint:", .{scroll_origin});
+    }
+}
+
+fn title_update(document: *Document, file_path: Id, word_count: u32) void {
+    const window = document.window;
+    objc.send(void, window, "setTitle:", .{objc.send(Id, file_path, "lastPathComponent", .{})});
+    const url = objc.send(Id, objc.class("NSURL"), "fileURLWithPath:", .{file_path});
+    objc.send(void, window, "setRepresentedURL:", .{url});
+    const words_per_minute = 230;
+    const minutes = @max(1, (word_count + words_per_minute / 2) / words_per_minute);
+    var buffer: [64]u8 = undefined;
+    const subtitle = std.fmt.bufPrint(&buffer, "{d} words · {d} min read", .{ word_count, minutes }) catch {
+        unreachable;
+    };
+    objc.send(void, window, "setSubtitle:", .{cocoa.string(subtitle)});
+}
+
+/// Centers the text column in the pane. The pane can be wider than a readable line.
+pub fn inset_update(document: *Document) void {
+    assert(document.open);
+    const width = objc.send(cocoa.Size, document.scroll_view, "contentSize", .{}).width;
+    const column = render.column_width * document.zoom;
+    const inset: cocoa.Size = .{
+        .width = @floor(@max(inset_min, (width - column) / 2)),
+        .height = 24,
+    };
+    const inset_old = objc.send(cocoa.Size, document.text_view, "textContainerInset", .{});
+    if (inset_old.width == inset.width and inset_old.height == inset.height) return;
+    objc.send(void, document.text_view, "setTextContainerInset:", .{inset});
+}
+
+/// Scrolls the heading to the top of the visible area, just below the toolbar.
+pub fn heading_show(document: *Document, heading_index: usize) void {
+    assert(document.open);
+    assert(heading_index < document.content.heading_count);
+    const heading = document.content.headings[heading_index];
+    const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
+    const container = objc.send(Id, document.text_view, "textContainer", .{});
+    const glyphs = objc.send(
+        cocoa.Range,
+        layout_manager,
+        "glyphRangeForCharacterRange:actualCharacterRange:",
+        .{ cocoa.Range{ .location = heading.location, .length = 1 }, @as(?*cocoa.Range, null) },
+    );
+    const rect = objc.send(
+        cocoa.Rect,
+        layout_manager,
+        "boundingRectForGlyphRange:inTextContainer:",
+        .{ glyphs, container },
+    );
+    const origin = objc.send(cocoa.Point, document.text_view, "textContainerOrigin", .{});
+    const insets = objc.send(cocoa.EdgeInsets, document.scroll_view, "contentInsets", .{});
+    const margin = 16;
+    const target: cocoa.Point = .{ .x = 0, .y = rect.origin.y + origin.y - insets.top - margin };
+    objc.send(void, document.text_view, "scrollPoint:", .{target});
+}
+
+/// Scrolls to the heading that a `#fragment` link names. Returns whether one matched.
+pub fn anchor_show(document: *Document, fragment: []const u8) bool {
+    assert(document.open);
+    var slug_buffer: [256]u8 = undefined;
+    var fragment_buffer: [256]u8 = undefined;
+    if (fragment.len > fragment_buffer.len) return false;
+    const wanted = std.ascii.lowerString(&fragment_buffer, fragment);
+    for (document.content.headings_slice(), 0..) |heading, index| {
+        if (std.mem.eql(u8, slug(heading.title, &slug_buffer), wanted)) {
+            heading_show(document, index);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The anchor name of a heading, as GitHub derives it: lowercase, spaces become hyphens, and
+/// other punctuation is dropped.
+fn slug(title: []const u8, buffer: []u8) []const u8 {
+    var count: usize = 0;
+    for (title) |byte| {
+        if (count == buffer.len) break;
+        const kept: ?u8 = if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte >= 0x80)
+            std.ascii.toLower(byte)
+        else if (byte == ' ')
+            '-'
+        else
+            null;
+        if (kept) |value| {
+            buffer[count] = value;
+            count += 1;
+        }
+    }
+    return buffer[0..count];
+}
+
+test "slug" {
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("getting-started", slug("Getting Started!", &buffer));
+    try std.testing.expectEqualStrings("a_b-c-1", slug("A_b-c (1)", &buffer));
+}
+
+// Window construction.
+
+fn window_create(document: *Document, controller: Id) void {
+    // NSWindowStyleMask: titled, closable, miniaturizable, resizable, full size content view.
+    const style_mask: usize = 1 | 2 | 4 | 8 | (1 << 15);
+    const backing_buffered: usize = 2;
+    const frame = cocoa.Rect.init(0, 0, 1080, 780);
+    const window = objc.send(
+        Id,
+        objc.alloc("NSWindow"),
+        "initWithContentRect:styleMask:backing:defer:",
+        .{ frame, style_mask, backing_buffered, false },
+    );
+    objc.send(void, window, "setReleasedWhenClosed:", .{false});
+    objc.send(void, window, "setDelegate:", .{controller});
+    objc.send(void, window, "setTabbingIdentifier:", .{cocoa.string("MiniedDocument")});
+    document.window = window;
+
+    const toolbar = objc.autorelease(objc.send(
+        Id,
+        objc.alloc("NSToolbar"),
+        "initWithIdentifier:",
+        .{cocoa.string("MiniedDocumentToolbar")},
+    ));
+    const display_icon_only: usize = 2;
+    const style_unified: isize = 3;
+    objc.send(void, toolbar, "setDelegate:", .{controller});
+    objc.send(void, toolbar, "setDisplayMode:", .{display_icon_only});
+    objc.send(void, window, "setToolbar:", .{toolbar});
+    objc.send(void, window, "setToolbarStyle:", .{style_unified});
+
+    const split = objc.new("NSSplitViewController");
+    const sidebar_item = objc.send(
+        Id,
+        objc.class("NSSplitViewItem"),
+        "sidebarWithViewController:",
+        .{view_controller(sidebar_create(document, controller))},
+    );
+    objc.send(void, sidebar_item, "setMinimumThickness:", .{@as(f64, 180)});
+    objc.send(void, sidebar_item, "setMaximumThickness:", .{@as(f64, 360)});
+    const content_item = objc.send(
+        Id,
+        objc.class("NSSplitViewItem"),
+        "splitViewItemWithViewController:",
+        .{view_controller(content_create(document, controller))},
+    );
+    objc.send(void, split, "addSplitViewItem:", .{sidebar_item});
+    objc.send(void, split, "addSplitViewItem:", .{content_item});
+    objc.send(void, window, "setContentViewController:", .{split});
+    objc.send(void, window, "setContentSize:", .{frame.size});
+    objc.send(void, window, "setContentMinSize:", .{cocoa.Size{ .width = 520, .height = 320 }});
+    objc.send(void, window, "center", .{});
+    _ = objc.send(bool, window, "setFrameAutosaveName:", .{cocoa.string("MiniedDocumentWindow")});
+
+    const center = objc.send(Id, objc.class("NSNotificationCenter"), "defaultCenter", .{});
+    objc.send(void, center, "addObserver:selector:name:object:", .{
+        controller,
+        objc.selector("viewFrameChanged:"),
+        cocoa.NSViewFrameDidChangeNotification,
+        document.scroll_view,
+    });
+}
+
+fn view_controller(view: Id) Id {
+    const controller = objc.new("NSViewController");
+    objc.send(void, controller, "setView:", .{view});
+    return controller;
+}
+
+fn sidebar_create(document: *Document, controller: Id) Id {
+    const table = objc.send(Id, objc.alloc("NSTableView"), "init", .{});
+    const column = objc.autorelease(objc.send(
+        Id,
+        objc.alloc("NSTableColumn"),
+        "initWithIdentifier:",
+        .{cocoa.string("title")},
+    ));
+    const style_source_list: isize = 3;
+    const focus_ring_none: usize = 1;
+    objc.send(void, table, "addTableColumn:", .{column});
+    objc.send(void, table, "setHeaderView:", .{@as(?Id, null)});
+    objc.send(void, table, "setStyle:", .{style_source_list});
+    objc.send(void, table, "setRowHeight:", .{@as(f64, 26)});
+    objc.send(void, table, "setFocusRingType:", .{focus_ring_none});
+    objc.send(void, table, "setDataSource:", .{controller});
+    objc.send(void, table, "setDelegate:", .{controller});
+    document.outline_view = table;
+
+    const scroll_view = objc.new("NSScrollView");
+    objc.send(void, scroll_view, "setDrawsBackground:", .{false});
+    objc.send(void, scroll_view, "setHasVerticalScroller:", .{true});
+    objc.send(void, scroll_view, "setDocumentView:", .{table});
+    objc.send(void, scroll_view, "setFrame:", .{cocoa.Rect.init(0, 0, 240, 600)});
+    return scroll_view;
+}
+
+fn content_create(document: *Document, controller: Id) Id {
+    const frame = cocoa.Rect.init(0, 0, 840, 780);
+    const dimension_max = 1.0e7;
+    const text_storage = objc.send(Id, objc.alloc("NSTextStorage"), "init", .{});
+    const layout_manager = objc.new("NSLayoutManager");
+    objc.send(void, text_storage, "addLayoutManager:", .{layout_manager});
+    const container = objc.autorelease(objc.send(
+        Id,
+        objc.alloc("NSTextContainer"),
+        "initWithSize:",
+        .{cocoa.Size{ .width = frame.size.width, .height = dimension_max }},
+    ));
+    objc.send(void, container, "setWidthTracksTextView:", .{true});
+    objc.send(void, layout_manager, "addTextContainer:", .{container});
+
+    const text_view = objc.send(
+        Id,
+        objc.alloc("NSTextView"),
+        "initWithFrame:textContainer:",
+        .{ frame, container },
+    );
+    const autoresizing_width: usize = 2;
+    objc.send(void, text_view, "setEditable:", .{false});
+    objc.send(void, text_view, "setSelectable:", .{true});
+    objc.send(void, text_view, "setVerticallyResizable:", .{true});
+    objc.send(void, text_view, "setHorizontallyResizable:", .{false});
+    objc.send(void, text_view, "setAutoresizingMask:", .{autoresizing_width});
+    objc.send(void, text_view, "setMaxSize:", .{cocoa.Size{ .width = dimension_max, .height = dimension_max }});
+    objc.send(void, text_view, "setBackgroundColor:", .{cocoa.color("textBackgroundColor")});
+    objc.send(void, text_view, "setUsesFindBar:", .{true});
+    objc.send(void, text_view, "setIncrementalSearchingEnabled:", .{true});
+    objc.send(void, text_view, "setDisplaysLinkToolTips:", .{true});
+    objc.send(void, text_view, "setDelegate:", .{controller});
+    const link_attributes = objc.new("NSMutableDictionary");
+    objc.send(void, link_attributes, "setObject:forKey:", .{
+        cocoa.color("controlAccentColor"),
+        cocoa.NSForegroundColorAttributeName,
+    });
+    objc.send(void, link_attributes, "setObject:forKey:", .{
+        objc.send(Id, objc.class("NSCursor"), "pointingHandCursor", .{}),
+        cocoa.NSCursorAttributeName,
+    });
+    objc.send(void, text_view, "setLinkTextAttributes:", .{link_attributes});
+
+    const scroll_view = objc.send(Id, objc.alloc("NSScrollView"), "initWithFrame:", .{frame});
+    objc.send(void, scroll_view, "setHasVerticalScroller:", .{true});
+    objc.send(void, scroll_view, "setDrawsBackground:", .{false});
+    objc.send(void, scroll_view, "setDocumentView:", .{text_view});
+    document.text_storage = text_storage;
+    document.text_view = text_view;
+    document.scroll_view = scroll_view;
+    return scroll_view;
+}
