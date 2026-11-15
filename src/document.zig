@@ -561,6 +561,10 @@ fn window_create(document: *Document, controller: Id) void {
     objc.send(void, window, "setReleasedWhenClosed:", .{false});
     objc.send(void, window, "setDelegate:", .{controller});
     objc.send(void, window, "setTabbingIdentifier:", .{cocoa.string("MiniMdViewDocument")});
+    // The window passes drags to its delegate, which opens the dropped files.
+    objc.send(void, window, "registerForDraggedTypes:", .{
+        cocoa.array(&.{cocoa.NSPasteboardTypeFileURL}),
+    });
     document.window = window;
 
     const toolbar = objc.autorelease(objc.send(

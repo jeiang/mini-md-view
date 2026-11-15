@@ -42,6 +42,8 @@ pub extern const NSToolbarToggleSidebarItemIdentifier: Id;
 pub extern const NSToolbarSidebarTrackingSeparatorItemIdentifier: Id;
 pub extern const NSToolbarFlexibleSpaceItemIdentifier: Id;
 pub extern const NSDefaultRunLoopMode: Id;
+pub extern const NSPasteboardTypeFileURL: Id;
+pub extern const NSPasteboardURLReadingFileURLsOnlyKey: Id;
 
 /// NSTextAlignment. Apple Silicon uses the iOS values, where center is 1 and right is 2.
 pub const TextAlignment = enum(isize) { left = 0, center = 1, right = 2, natural = 4 };

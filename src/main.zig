@@ -57,6 +57,9 @@ fn controller_class() Id {
             .implementation = &supports_secure_state,
         },
         .{ .name = "openDocument:", .types = "v@:@", .implementation = &action_open },
+        .{ .name = "openURLs:", .types = "v@:@", .implementation = &action_open_urls },
+        .{ .name = "draggingEntered:", .types = "Q@:@", .implementation = &drag_entered },
+        .{ .name = "performDragOperation:", .types = "B@:@", .implementation = &drag_perform },
         .{ .name = "reloadDocument:", .types = "v@:@", .implementation = &action_reload },
         .{ .name = "zoomIn:", .types = "v@:@", .implementation = &action_zoom_in },
         .{ .name = "zoomOut:", .types = "v@:@", .implementation = &action_zoom_out },
@@ -192,12 +195,53 @@ fn open_panel_run() void {
     objc.send(void, panel, "setAllowsMultipleSelection:", .{true});
     const response_ok: isize = 1;
     if (objc.send(isize, panel, "runModal", .{}) != response_ok) return;
-    const urls = objc.send(Id, panel, "URLs", .{});
+    urls_open(objc.send(Id, panel, "URLs", .{}));
+}
+
+fn urls_open(urls: Id) void {
     const count = objc.send(usize, urls, "count", .{});
     for (0..count) |index| {
         const url = objc.send(Id, urls, "objectAtIndex:", .{index});
         if (objc.send(?Id, url, "path", .{})) |file_path| path_open(file_path);
     }
+}
+
+// Dropping files on a window.
+
+/// The file URLs of a drag, or null when it carries none.
+fn drag_urls(info: Id) ?Id {
+    const pasteboard = objc.send(Id, info, "draggingPasteboard", .{});
+    const options = objc.send(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{
+        objc.send(Id, objc.class("NSNumber"), "numberWithBool:", .{true}),
+        cocoa.NSPasteboardURLReadingFileURLsOnlyKey,
+    });
+    const urls = objc.send(?Id, pasteboard, "readObjectsForClasses:options:", .{
+        cocoa.array(&.{objc.class("NSURL")}),
+        options,
+    }) orelse return null;
+    if (objc.send(usize, urls, "count", .{}) == 0) return null;
+    return urls;
+}
+
+fn drag_entered(_: Id, _: Selector, info: Id) callconv(.c) usize {
+    const drag_operation_none: usize = 0;
+    const drag_operation_copy: usize = 1;
+    return if (drag_urls(info) == null) drag_operation_none else drag_operation_copy;
+}
+
+fn drag_perform(_: Id, _: Selector, info: Id) callconv(.c) bool {
+    const urls = drag_urls(info) orelse return false;
+    // The files open after the drag ends: an alert during the drag would stall Finder.
+    objc.send(void, controller, "performSelector:withObject:afterDelay:", .{
+        objc.selector("openURLs:"),
+        urls,
+        @as(f64, 0),
+    });
+    return true;
+}
+
+fn action_open_urls(_: Id, _: Selector, urls: Id) callconv(.c) void {
+    urls_open(urls);
 }
 
 // Menu and toolbar actions.

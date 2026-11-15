@@ -24,7 +24,8 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
 
 ## What it does
 
-- Opens `.md` files from the Open panel, the command line, the Dock, or Finder's "Open With".
+- Opens `.md` files from the Open panel, the command line, the Dock, Finder's "Open With", or a
+  drop on a window.
 - Shows up to 8 documents, each in its own window.
 - Reloads a document when its file changes on disk, and keeps the scroll position. When the new
   file cannot be shown, the old content stays and the window subtitle says why.
