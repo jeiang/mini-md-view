@@ -3,7 +3,8 @@
 //! Text, lists, tables, quotes and code blocks all use TextKit: paragraph styles, tab stops,
 //! `NSTextTable`, and `NSTextBlock` subclasses that draw their own backgrounds. Diagrams and
 //! images are text attachments. The result is one attributed string in one text view, so that
-//! selection, copy, find and printing work across the whole document.
+//! selection, copy, find and printing work across the whole document. The exception is a table
+//! too wide for the text column: it gets a text view of its own that scrolls sideways.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -177,6 +178,9 @@ const Builder = struct {
     table_align: markdown.Align = .default,
     table_column_count: u32 = 0,
     table_widths: [markdown.table_columns_max]f64 = undefined,
+    table_word_widths: [markdown.table_columns_max]f64 = undefined,
+    /// String position where the table's first cell begins.
+    table_start: usize = 0,
     table_cells: [table_cells_max]Id = undefined,
     table_cell_count: u32 = 0,
 
@@ -677,17 +681,124 @@ fn code_span_append(builder: *Builder, bytes: []const u8) void {
 
 var layout_manager_class: ?Id = null;
 
-/// An autoreleased layout manager that draws inline code backgrounds.
+/// An autoreleased layout manager that draws inline code backgrounds, finds the glyphs of
+/// tall table rows, and places the views of wide tables. It is its own delegate.
 pub fn layout_manager_new() Id {
     if (layout_manager_class == null) {
-        layout_manager_class = objc.class_define("MiniMdLayoutManager", "NSLayoutManager", &.{.{
-            .name = "drawBackgroundForGlyphRange:atPoint:",
-            .types = "v@:" ++ cocoa.type_range ++ cocoa.type_point,
-            .implementation = &layout_draw_background,
-        }}, false);
+        const bounding_types = cocoa.type_range ++ "@:" ++ cocoa.type_rect ++ "@";
+        layout_manager_class = objc.class_define("MiniMdLayoutManager", "NSLayoutManager", &.{
+            .{
+                .name = "drawBackgroundForGlyphRange:atPoint:",
+                .types = "v@:" ++ cocoa.type_range ++ cocoa.type_point,
+                .implementation = &layout_draw_background,
+            },
+            .{
+                .name = bounding_name,
+                .types = bounding_types,
+                .implementation = &layout_glyphs_in_rect(bounding_name),
+            },
+            .{
+                .name = bounding_name_without_layout,
+                .types = bounding_types,
+                .implementation = &layout_glyphs_in_rect(bounding_name_without_layout),
+            },
+            .{
+                .name = "layoutManager:didCompleteLayoutForTextContainer:atEnd:",
+                .types = "v@:@@B",
+                .implementation = &layout_completed,
+            },
+        }, false);
     }
     const allocated = objc.send(Id, layout_manager_class.?, "alloc", .{});
-    return objc.autorelease(objc.send(Id, allocated, "init", .{}));
+    const manager = objc.autorelease(objc.send(Id, allocated, "init", .{}));
+    objc.send(void, manager, "setDelegate:", .{manager});
+    return manager;
+}
+
+fn layout_completed(_: Id, _: objc.Selector, manager: Id, _: ?Id, _: bool) callconv(.c) void {
+    tables_place(manager);
+}
+
+const bounding_name = "glyphRangeForBoundingRect:inTextContainer:";
+const bounding_name_without_layout = "glyphRangeForBoundingRectWithoutAdditionalLayout:" ++
+    "inTextContainer:";
+
+/// TextKit finds no glyphs for a thin rectangle inside a table row when the rectangle meets
+/// only the padding of the cells, for example below the last line of most cells in a tall row.
+/// A text view then draws nothing there, not even the cell borders, and scrolling leaves gaps.
+/// So the range grows to every table that the top or the bottom edge of the rectangle is in.
+fn layout_glyphs_in_rect(comptime name: [:0]const u8) fn (
+    Id,
+    objc.Selector,
+    cocoa.Rect,
+    Id,
+) callconv(.c) cocoa.Range {
+    return struct {
+        fn glyphs_in_rect(
+            manager: Id,
+            _: objc.Selector,
+            rect: cocoa.Rect,
+            container: Id,
+        ) callconv(.c) cocoa.Range {
+            var result = objc.send_super(cocoa.Range, manager, "NSLayoutManager", name, .{
+                rect,
+                container,
+            });
+            const storage = objc.send(?Id, manager, "textStorage", .{}) orelse return result;
+            const length = objc.send(usize, storage, "length", .{});
+            for ([2]f64{ rect.origin.y, rect.origin.y + rect.size.height }) |y| {
+                const glyph = objc.send(
+                    usize,
+                    manager,
+                    "glyphIndexForPoint:inTextContainer:fractionOfDistanceThroughGlyph:",
+                    .{ cocoa.Point{ .x = rect.origin.x, .y = y }, container, @as(?*f64, null) },
+                );
+                const character = objc.send(usize, manager, "characterIndexForGlyphAtIndex:", .{
+                    glyph,
+                });
+                if (character >= length) continue;
+                const table = text_table_at(storage, character) orelse continue;
+                const characters = objc.send(cocoa.Range, storage, "rangeOfTextTable:atIndex:", .{
+                    table,
+                    character,
+                });
+                result = range_union(result, objc.send(
+                    cocoa.Range,
+                    manager,
+                    "glyphRangeForCharacterRange:actualCharacterRange:",
+                    .{ characters, @as(?*cocoa.Range, null) },
+                ));
+            }
+            return result;
+        }
+    }.glyphs_in_rect;
+}
+
+/// The innermost table that the paragraph at a string position is in.
+fn text_table_at(storage: Id, location: usize) ?Id {
+    const style = objc.send(?Id, storage, "attribute:atIndex:effectiveRange:", .{
+        cocoa.NSParagraphStyleAttributeName,
+        location,
+        @as(?*cocoa.Range, null),
+    }) orelse return null;
+    const blocks = objc.send(Id, style, "textBlocks", .{});
+    var index = objc.send(usize, blocks, "count", .{});
+    while (index > 0) {
+        index -= 1;
+        const block = objc.send(Id, blocks, "objectAtIndex:", .{index});
+        if (objc.send(bool, block, "isKindOfClass:", .{objc.class("NSTextTableBlock")})) {
+            return objc.send(Id, block, "table", .{});
+        }
+    }
+    return null;
+}
+
+fn range_union(a: cocoa.Range, b: cocoa.Range) cocoa.Range {
+    if (a.length == 0) return b;
+    if (b.length == 0) return a;
+    const start = @min(a.location, b.location);
+    const end = @max(a.location + a.length, b.location + b.length);
+    return .{ .location = start, .length = end - start };
 }
 
 fn layout_draw_background(
@@ -1345,6 +1456,8 @@ fn table_begin(builder: *Builder, column_count: u8) void {
     builder.table_column_count = column_count;
     builder.table_cell_count = 0;
     @memset(builder.table_widths[0..column_count], 0);
+    @memset(builder.table_word_widths[0..column_count], 0);
+    builder.table_start = builder.length();
 }
 
 fn cell_begin(builder: *Builder) void {
@@ -1390,6 +1503,8 @@ fn cell_end(builder: *Builder, cell_align: markdown.Align) void {
         const width = objc.send(cocoa.Size, text, "size", .{}).width;
         const slot = &builder.table_widths[builder.table_column];
         slot.* = @max(slot.*, width);
+        const word_slot = &builder.table_word_widths[builder.table_column];
+        word_slot.* = @max(word_slot.*, word_width_max(text));
     }
     builder.paragraph_end(.{
         .alignment = switch (cell_align) {
@@ -1404,31 +1519,326 @@ fn cell_end(builder: *Builder, cell_align: markdown.Align) void {
     builder.table_column += 1;
 }
 
-/// Sizes the columns in proportion to their widest cell. A small table keeps its natural
-/// width, and a large one fills the text column.
+/// The width of the widest word in the text, which a column cannot be narrower than without
+/// breaking the word. Only words with at least half the characters of the longest one are
+/// measured.
+fn word_width_max(text: Id) f64 {
+    const string = objc.send(Id, text, "string", .{});
+    const length = objc.send(usize, string, "length", .{});
+    var longest: usize = 0;
+    for (0..2) |pass| {
+        var widest: f64 = 0;
+        var start: usize = 0;
+        var index: usize = 0;
+        while (index <= length) : (index += 1) {
+            const character = if (index < length)
+                objc.send(u16, string, "characterAtIndex:", .{index})
+            else
+                ' ';
+            // TextKit breaks lines at spaces, and after a hyphen or a slash.
+            const space = character == ' ' or character == '\t' or character == 0x2028;
+            const breaks_after = character == '-' or character == '/';
+            const end = if (space) index else if (breaks_after) index + 1 else continue;
+            const word_length = end - start;
+            if (pass == 0) {
+                longest = @max(longest, word_length);
+            } else if (word_length > 0 and word_length * 2 >= longest) {
+                const word = objc.send(Id, text, "attributedSubstringFromRange:", .{
+                    cocoa.Range{ .location = start, .length = word_length },
+                });
+                widest = @max(widest, objc.send(cocoa.Size, word, "size", .{}).width);
+            }
+            start = if (space) index + 1 else end;
+        }
+        if (pass == 1) return widest;
+    }
+    unreachable;
+}
+
+/// A column gets the width of its text up to this many body font sizes, so that text wraps
+/// into lines of reasonable length. Only a longer word makes it wider.
+const column_width_reasonable = 14;
+
+/// Sizes the columns like a web browser does. A small table keeps its natural width. A larger
+/// one fills the text column: each column gets a reasonable width first, and the rest goes to
+/// the columns with more text. A table whose reasonable widths do not fit scrolls sideways.
 fn table_end(builder: *Builder) void {
     assert(builder.table != null);
     const column_count = builder.table_column_count;
     const chrome = builder.scaled(2 * table_cell_padding) + 1;
+    // The text column, less the line fragment padding on both sides.
+    const available = builder.scaled(column_width) - builder.indent() - 10;
+    var natural: [markdown.table_columns_max]f64 = undefined;
+    var reasonable: [markdown.table_columns_max]f64 = undefined;
+    var natural_total: f64 = 0;
+    var reasonable_total: f64 = 0;
+    for (0..column_count) |column| {
+        natural[column] = @ceil(builder.table_widths[column]);
+        reasonable[column] = @max(
+            @ceil(builder.table_word_widths[column]),
+            @min(natural[column], builder.scaled(size_body * column_width_reasonable)),
+        );
+        natural_total += natural[column] + chrome;
+        reasonable_total += reasonable[column] + chrome;
+    }
+    assert(natural_total > 0);
+    const cells_known = builder.table_cell_count <= table_cells_max;
+    const Layout = enum { natural, fill, scroll };
+    const layout: Layout = if (natural_total <= builder.scaled(420))
+        .natural
+    else if (reasonable_total > available and cells_known)
+        .scroll
+    else
+        .fill;
+    var widths: [markdown.table_columns_max]f64 = undefined;
+    switch (layout) {
+        .natural => @memcpy(widths[0..column_count], natural[0..column_count]),
+        .scroll => @memcpy(widths[0..column_count], reasonable[0..column_count]),
+        .fill => {
+            // Grow the columns from their reasonable widths towards their natural widths, then
+            // share what is left in proportion to the natural widths.
+            const extra = @max(0, available - reasonable_total);
+            const wanted = natural_total - reasonable_total;
+            for (0..column_count) |column| {
+                const want = natural[column] - reasonable[column];
+                widths[column] = if (wanted > extra)
+                    reasonable[column] + extra * want / wanted
+                else
+                    natural[column] + (extra - wanted) * (natural[column] + chrome) / natural_total;
+            }
+        },
+    }
     var total: f64 = 0;
-    for (builder.table_widths[0..column_count]) |width| total += @ceil(width) + chrome;
-    assert(total > 0);
-    const natural = total <= builder.scaled(420);
+    for (widths[0..column_count]) |width| total += width + chrome;
     const type_absolute: usize = 0;
     const type_percentage: usize = 1;
     const dimension_width: usize = 0;
-    if (builder.table_cell_count <= table_cells_max) {
+    if (cells_known) {
         for (builder.table_cells[0..builder.table_cell_count], 0..) |block, index| {
-            const width = @ceil(builder.table_widths[index % column_count]) + chrome;
+            const width = widths[index % column_count] + chrome;
             objc.send(void, block, "setValue:type:forDimension:", .{
-                if (natural) width else width / total * 100,
-                if (natural) type_absolute else type_percentage,
+                if (layout == .fill) width / total * 100 else width,
+                if (layout == .fill) type_percentage else type_absolute,
                 dimension_width,
             });
         }
     }
+    if (layout == .scroll) table_scroll_wrap(builder, @ceil(total));
     builder.table = null;
     builder.block_first = false;
+}
+
+/// Attribute that holds the scroll view of a table that is wider than the text column. Its
+/// character is a placeholder as tall as the view, and the view lies on top of it.
+fn table_view_key() Id {
+    return cocoa.string("MiniMdTableView");
+}
+
+/// Moves the table out of the string into a text view of its own that scrolls sideways, and
+/// puts a placeholder in its place. Find, selection and printing in the document do not reach
+/// into such a table.
+fn table_scroll_wrap(builder: *Builder, width: f64) void {
+    const range: cocoa.Range = .{
+        .location = builder.table_start,
+        .length = builder.length() - builder.table_start,
+    };
+    const table_text = objc.autorelease(objc.send(
+        Id,
+        objc.send(Id, builder.storage, "attributedSubstringFromRange:", .{range}),
+        "mutableCopy",
+        .{},
+    ));
+    // The table view does not show the quotes around the table.
+    var index: usize = 0;
+    while (index < range.length) {
+        var run: cocoa.Range = undefined;
+        const style = objc.send(Id, table_text, "attribute:atIndex:effectiveRange:", .{
+            cocoa.NSParagraphStyleAttributeName,
+            index,
+            &run,
+        });
+        const blocks = objc.send(Id, style, "textBlocks", .{});
+        const cell_style = objc.autorelease(objc.send(Id, style, "mutableCopy", .{}));
+        objc.send(void, cell_style, "setTextBlocks:", .{cocoa.array(&.{
+            objc.send(Id, blocks, "lastObject", .{}),
+        })});
+        objc.send(void, table_text, "addAttribute:value:range:", .{
+            cocoa.NSParagraphStyleAttributeName,
+            cell_style,
+            run,
+        });
+        index = run.location + run.length;
+    }
+    for (&builder.content.footnote_reference_locations) |*location| {
+        if (location.* == location_none or location.* < range.location) continue;
+        location.* = range.location;
+    }
+    objc.send(void, builder.storage, "deleteCharactersInRange:", .{range});
+
+    const view = table_view_new(table_text, width);
+    const height = objc.send(cocoa.Rect, view, "frame", .{}).size.height;
+    const image = objc.autorelease(objc.send(Id, objc.alloc("NSImage"), "initWithSize:", .{
+        cocoa.Size{ .width = 1, .height = height },
+    }));
+    const attachment = objc.new("NSTextAttachment");
+    objc.send(void, attachment, "setImage:", .{image});
+    objc.send(void, attachment, "setBounds:", .{cocoa.Rect.init(0, 0, 1, height)});
+    const style = objc.new("NSMutableParagraphStyle");
+    objc.send(void, style, "setMinimumLineHeight:", .{height});
+    objc.send(void, style, "setMaximumLineHeight:", .{height});
+    objc.send(void, style, "setFirstLineHeadIndent:", .{builder.indent()});
+    objc.send(void, style, "setHeadIndent:", .{builder.indent()});
+    objc.send(void, style, "setTextBlocks:", .{builder.blocks(null)});
+    const placeholder_attributes = builder.attributes(.{ .size = font_size_tiny });
+    dictionary_set(placeholder_attributes, cocoa.NSParagraphStyleAttributeName, style);
+    dictionary_set(placeholder_attributes, table_view_key(), view);
+    builder.attachment_append(attachment, placeholder_attributes);
+    builder.append("\n", placeholder_attributes);
+}
+
+var table_scroll_class: ?Id = null;
+
+/// An autoreleased scroll view that shows the table text at its full width, and scrolls it
+/// sideways only.
+fn table_view_new(table_text: Id, width: f64) Id {
+    const dimension_max = 1.0e7;
+    const text_view = objc.autorelease(objc.send(Id, objc.alloc("NSTextView"), "initWithFrame:", .{
+        cocoa.Rect.init(0, 0, width, dimension_max),
+    }));
+    const container = objc.send(Id, text_view, "textContainer", .{});
+    objc.send(void, container, "replaceLayoutManager:", .{layout_manager_new()});
+    objc.send(void, container, "setWidthTracksTextView:", .{false});
+    objc.send(void, container, "setLineFragmentPadding:", .{@as(f64, 0)});
+    objc.send(void, container, "setContainerSize:", .{
+        cocoa.Size{ .width = width, .height = dimension_max },
+    });
+    objc.send(void, text_view, "setTextContainerInset:", .{cocoa.Size{}});
+    objc.send(void, text_view, "setEditable:", .{false});
+    objc.send(void, text_view, "setSelectable:", .{true});
+    objc.send(void, text_view, "setDrawsBackground:", .{false});
+    objc.send(void, text_view, "setDisplaysLinkToolTips:", .{true});
+    objc.send(void, text_view, "setVerticallyResizable:", .{false});
+    objc.send(void, text_view, "setHorizontallyResizable:", .{false});
+    const storage = objc.send(Id, text_view, "textStorage", .{});
+    objc.send(void, storage, "setAttributedString:", .{table_text});
+    const manager = objc.send(Id, text_view, "layoutManager", .{});
+    objc.send(void, manager, "ensureLayoutForTextContainer:", .{container});
+    const used = objc.send(cocoa.Rect, manager, "usedRectForTextContainer:", .{container});
+    const height = @ceil(used.size.height);
+    objc.send(void, text_view, "setFrameSize:", .{cocoa.Size{ .width = width, .height = height }});
+
+    if (table_scroll_class == null) {
+        table_scroll_class = objc.class_define("MiniMdTableScrollView", "NSScrollView", &.{.{
+            .name = "scrollWheel:",
+            .types = "v@:@",
+            .implementation = &table_scroll_wheel,
+        }}, false);
+    }
+    // Legacy scrollers take room below the table; overlay scrollers lie on top of it.
+    const scroller = objc.class("NSScroller");
+    const scroller_style = objc.send(isize, scroller, "preferredScrollerStyle", .{});
+    const scroller_height = if (scroller_style == 0)
+        objc.send(f64, scroller, "scrollerWidthForControlSize:scrollerStyle:", .{
+            @as(usize, 0),
+            scroller_style,
+        })
+    else
+        0;
+    const scroll_view = objc.autorelease(objc.send(
+        Id,
+        objc.send(Id, table_scroll_class.?, "alloc", .{}),
+        "initWithFrame:",
+        .{cocoa.Rect.init(0, 0, width, height + scroller_height)},
+    ));
+    const elasticity_none: isize = 1;
+    objc.send(void, scroll_view, "setDocumentView:", .{text_view});
+    objc.send(void, scroll_view, "setHasHorizontalScroller:", .{true});
+    objc.send(void, scroll_view, "setHasVerticalScroller:", .{false});
+    objc.send(void, scroll_view, "setAutohidesScrollers:", .{true});
+    objc.send(void, scroll_view, "setDrawsBackground:", .{false});
+    objc.send(void, scroll_view, "setVerticalScrollElasticity:", .{elasticity_none});
+    return scroll_view;
+}
+
+/// Passes mostly vertical scrolling on to the document, so that the table does not stop it.
+fn table_scroll_wheel(view: Id, _: objc.Selector, event: Id) callconv(.c) void {
+    const x = objc.send(f64, event, "scrollingDeltaX", .{});
+    const y = objc.send(f64, event, "scrollingDeltaY", .{});
+    if (@abs(y) > @abs(x)) {
+        if (objc.send(?Id, view, "nextResponder", .{})) |next| {
+            return objc.send(void, next, "scrollWheel:", .{event});
+        }
+    }
+    objc.send_super(void, view, "NSScrollView", "scrollWheel:", .{event});
+}
+
+/// Puts the scroll view of each wide table on its placeholder. Called after every layout pass,
+/// because a placeholder moves when the text above it changes height.
+fn tables_place(manager: Id) void {
+    const text_view = objc.send(?Id, manager, "firstTextView", .{}) orelse return;
+    const storage = objc.send(?Id, manager, "textStorage", .{}) orelse return;
+    const container = objc.send(Id, text_view, "textContainer", .{});
+    const padding = objc.send(f64, container, "lineFragmentPadding", .{});
+    const origin = objc.send(cocoa.Point, text_view, "textContainerOrigin", .{});
+    const all: cocoa.Range = .{ .location = 0, .length = objc.send(usize, storage, "length", .{}) };
+    var index: usize = 0;
+    while (index < all.length) {
+        var run: cocoa.Range = undefined;
+        const found = objc.send(
+            ?Id,
+            storage,
+            "attribute:atIndex:longestEffectiveRange:inRange:",
+            .{ table_view_key(), index, &run, all },
+        );
+        assert(run.length > 0);
+        index = run.location + run.length;
+        const view = found orelse continue;
+        const glyph = objc.send(usize, manager, "glyphIndexForCharacterAtIndex:", .{run.location});
+        const line = objc.send(
+            cocoa.Rect,
+            manager,
+            "lineFragmentRectForGlyphAtIndex:effectiveRange:withoutAdditionalLayout:",
+            .{ glyph, @as(?*cocoa.Range, null), true },
+        );
+        if (line.size.height == 0) continue;
+        const style = objc.send(Id, storage, "attribute:atIndex:effectiveRange:", .{
+            cocoa.NSParagraphStyleAttributeName,
+            run.location,
+            @as(?*cocoa.Range, null),
+        });
+        const indent = objc.send(f64, style, "headIndent", .{});
+        const height = objc.send(cocoa.Rect, view, "frame", .{}).size.height;
+        objc.send(void, view, "setFrame:", .{cocoa.Rect.init(
+            origin.x + line.origin.x + padding + indent,
+            origin.y + line.origin.y,
+            @max(0, line.size.width - 2 * padding - indent),
+            height,
+        )});
+        if (objc.send(?Id, view, "superview", .{}) != text_view) {
+            const table_text_view = objc.send(Id, view, "documentView", .{});
+            objc.send(void, table_text_view, "setDelegate:", .{
+                objc.send(?Id, text_view, "delegate", .{}),
+            });
+            objc.send(void, table_text_view, "setLinkTextAttributes:", .{
+                objc.send(?Id, text_view, "linkTextAttributes", .{}),
+            });
+            objc.send(void, text_view, "addSubview:", .{view});
+        }
+    }
+}
+
+/// Removes the table views of the old string. Call before the text view gets a new string.
+pub fn tables_remove(text_view: Id) void {
+    const class = table_scroll_class orelse return;
+    const subviews = objc.send(Id, objc.send(Id, text_view, "subviews", .{}), "copy", .{});
+    defer objc.release(subviews);
+    const count = objc.send(usize, subviews, "count", .{});
+    for (0..count) |index| {
+        const view = objc.send(Id, subviews, "objectAtIndex:", .{index});
+        if (objc.send(bool, view, "isKindOfClass:", .{class})) {
+            objc.send(void, view, "removeFromSuperview", .{});
+        }
+    }
 }
 
 // Inline events.

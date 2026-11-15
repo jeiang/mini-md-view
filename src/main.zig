@@ -539,8 +539,10 @@ const schemes_allowed = [_][]const u8{ "http", "https", "mailto" };
 
 /// Links inside the document scroll to their heading, links to other Markdown files show them in
 /// the same window, and web and mail links go to the default application.
-fn link_clicked(_: Id, _: Selector, text_view: ?Id, link: Id, _: usize) callconv(.c) bool {
-    const shown = document.find(.text_view, text_view) orelse return false;
+fn link_clicked(_: Id, _: Selector, text_view: Id, link: Id, _: usize) callconv(.c) bool {
+    // A wide table has a text view of its own, so the window identifies the document.
+    const window = objc.send(?Id, text_view, "window", .{});
+    const shown = document.find(.window, window) orelse return false;
     const is_string = objc.send(bool, link, "isKindOfClass:", .{objc.class("NSString")});
     if (!is_string) return false;
     const destination = cocoa.string_bytes(link);
