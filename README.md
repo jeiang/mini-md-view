@@ -14,6 +14,7 @@ The Nix shell provides Zig and the macOS SDK.
 nix develop -c zig build                    # zig-out/MiniMdView.app
 nix develop -c zig build run -- README.md   # build, then open a file
 nix develop -c zig build test               # parser and diagram layout
+nix develop -c zig build icon               # redraw the icon from tools/icon.zig
 open zig-out/MiniMdView.app --args "$PWD/README.md"
 ```
 

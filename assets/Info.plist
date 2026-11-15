@@ -8,6 +8,8 @@
 	<string>mini-md-view</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.mini-md-view.MiniMdView</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
