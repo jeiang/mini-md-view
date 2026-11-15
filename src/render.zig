@@ -57,6 +57,10 @@ pub const Content = struct {
     /// Diagram sources and generated diagram text.
     text: [diagram_text_size_max]u8,
     text_count: u32,
+    /// Positions of footnote definitions and of their first references, by footnote number
+    /// minus one, or `location_none`.
+    footnote_locations: [markdown.footnotes_max]usize,
+    footnote_reference_locations: [markdown.footnotes_max]usize,
 
     pub fn reset(content: *Content) void {
         content.heading_count = 0;
@@ -65,13 +69,32 @@ pub const Content = struct {
         content.command_count = 0;
         content.point_count = 0;
         content.text_count = 0;
+        content.footnote_locations = @splat(location_none);
+        content.footnote_reference_locations = @splat(location_none);
     }
 
     pub fn headings_slice(content: *const Content) []const Heading {
         assert(content.heading_count <= headings_max);
         return content.headings[0..content.heading_count];
     }
+
+    /// The position that a `fn-N` or `fnref-N` link fragment points to.
+    pub fn footnote_location(content: *const Content, fragment: []const u8) ?usize {
+        const reference = std.mem.startsWith(u8, fragment, "fnref-");
+        if (!reference and !std.mem.startsWith(u8, fragment, "fn-")) return null;
+        const digits = fragment[if (reference) "fnref-".len else "fn-".len..];
+        const number = std.fmt.parseInt(u32, digits, 10) catch return null;
+        if (number == 0 or number > markdown.footnotes_max) return null;
+        const locations = if (reference)
+            &content.footnote_reference_locations
+        else
+            &content.footnote_locations;
+        const location = locations[number - 1];
+        return if (location == location_none) null else location;
+    }
 };
+
+const location_none = std.math.maxInt(usize);
 
 pub const Options = struct {
     zoom: f64,
@@ -83,7 +106,7 @@ pub const Options = struct {
 };
 
 const Frame = union(enum) {
-    quote: Id,
+    quote: struct { block: Id, alert: markdown.Alert },
     list: struct { ordered: bool, number: u32, tight: bool, item_count: u32 },
     item,
     cell: Id,
@@ -95,9 +118,10 @@ const FontStyle = struct {
     italic: bool = false,
     size: u8 = 0,
 };
-const font_sizes_count = 9;
+const font_sizes_count = 10;
 const font_size_code_block = 7;
 const font_size_tiny = 8;
+const font_size_note = 9;
 
 const CodeMode = enum { none, plain, mermaid };
 
@@ -128,6 +152,8 @@ const Builder = struct {
     image_hidden_depth: u32 = 0,
     /// The alternative text of an image that was not loaded links to the image source.
     image_link: bool = false,
+    /// The string length after the last paragraph, which a footnote back link can join.
+    paragraph_end_location: usize = 0,
 
     code_mode: CodeMode = .none,
     code_block: ?Id = null,
@@ -163,6 +189,7 @@ const Builder = struct {
             1...6 => sizes_heading[index - 1],
             font_size_code_block => size_code,
             font_size_tiny => 1,
+            font_size_note => size_body * 0.7,
             else => unreachable,
         });
     }
@@ -196,10 +223,17 @@ const Builder = struct {
         return created;
     }
 
-    fn quote_depth(builder: *const Builder) u32 {
-        var depth: u32 = 0;
-        for (builder.frames[0..builder.frame_count]) |frame| depth += @intFromBool(frame == .quote);
-        return depth;
+    /// Text in a quote is muted, but text in an alert is not.
+    fn quote_muted(builder: *const Builder) bool {
+        var index = builder.frame_count;
+        while (index > 0) {
+            index -= 1;
+            switch (builder.frames[index]) {
+                .quote => |quote| return quote.alert == .none,
+                .list, .item, .cell => {},
+            }
+        }
+        return false;
     }
 
     fn style_current(builder: *const Builder) FontStyle {
@@ -214,7 +248,7 @@ const Builder = struct {
     /// The attributes for a run of text in the current inline state.
     fn attributes(builder: *Builder, style: FontStyle) Id {
         const result = objc.new("NSMutableDictionary");
-        const muted = builder.heading_level == 6 or builder.quote_depth() > 0;
+        const muted = builder.heading_level == 6 or builder.quote_muted();
         const color = if (muted) cocoa.color("secondaryLabelColor") else cocoa.color("labelColor");
         dictionary_set(result, cocoa.NSFontAttributeName, builder.font(style));
         dictionary_set(result, cocoa.NSForegroundColorAttributeName, color);
@@ -320,7 +354,8 @@ const Builder = struct {
     fn blocks(builder: *Builder, extra: ?Id) Id {
         const result = objc.new("NSMutableArray");
         for (builder.frames[0..builder.frame_count]) |frame| switch (frame) {
-            .quote, .cell => |block| objc.send(void, result, "addObject:", .{block}),
+            .quote => |quote| objc.send(void, result, "addObject:", .{quote.block}),
+            .cell => |block| objc.send(void, result, "addObject:", .{block}),
             .list, .item => {},
         };
         if (extra) |block| objc.send(void, result, "addObject:", .{block});
@@ -547,7 +582,10 @@ fn quote_block_draw(
     const bar_width: f64 = 3.5;
     const bar = cocoa.Rect.init(frame.origin.x, frame.origin.y, bar_width, frame.size.height);
     cocoa.path_add_rounded(context, bar, bar_width / 2);
-    objc.send(void, cocoa.color("controlAccentColor"), "setFill", .{});
+    // This method replaces the background drawing, so an alert keeps its bar color there.
+    const color = objc.send(?Id, block, "backgroundColor", .{}) orelse
+        cocoa.color("controlAccentColor");
+    objc.send(void, color, "setFill", .{});
     cocoa.CGContextFillPath(context);
 }
 
@@ -611,7 +649,7 @@ fn block_layer_set(block: Id, layer: cocoa.BlockLayer, width: f64) void {
 
 fn event_apply(builder: *Builder, event: markdown.Event) void {
     switch (event) {
-        .blockquote_start => quote_begin(builder),
+        .blockquote_start => |alert| quote_begin(builder, alert),
         .blockquote_end, .list_end => container_end(builder),
         .list_start => |list| {
             builder.marker_flush();
@@ -628,7 +666,10 @@ fn event_apply(builder: *Builder, event: markdown.Event) void {
             container_end(builder);
         },
         .paragraph_start => builder.text_marker = builder.text_block_begin(),
-        .paragraph_end => builder.text_block_end(builder.gap(), 0),
+        .paragraph_end => {
+            builder.text_block_end(builder.gap(), 0);
+            builder.paragraph_end_location = builder.length();
+        },
         .heading_start => |level| {
             assert(level >= 1 and level <= 6);
             builder.heading_level = level;
@@ -656,6 +697,8 @@ fn event_apply(builder: *Builder, event: markdown.Event) void {
             cell_begin(builder);
         },
         .cell_end => cell_end(builder, builder.table_align),
+        .footnote_start => |number| footnote_begin(builder, number),
+        .footnote_end => footnote_end(builder),
         else => inline_apply(builder, event),
     }
 }
@@ -665,15 +708,40 @@ fn container_end(builder: *Builder) void {
     builder.block_first = false;
 }
 
-fn quote_begin(builder: *Builder) void {
+fn quote_begin(builder: *Builder, alert: markdown.Alert) void {
     builder.marker_flush();
     const block = text_block_new(&quote_block_class, "MiniMdViewQuoteBlock", &quote_block_draw);
     block_fill_width(block);
     block_edge_set(block, .margin, .y_min, builder.gap());
     block_edge_set(block, .margin, .x_min, builder.indent());
     block_edge_set(block, .padding, .x_min, builder.scaled(16));
-    builder.frame_push(.{ .quote = block });
+    builder.frame_push(.{ .quote = .{ .block = block, .alert = alert } });
     builder.block_first = true;
+    if (alert == .none) return;
+
+    const color = switch (alert) {
+        .none => unreachable,
+        .note => cocoa.color("systemBlueColor"),
+        .tip => cocoa.color("systemGreenColor"),
+        .important => cocoa.color("systemPurpleColor"),
+        .warning => cocoa.color("systemOrangeColor"),
+        .caution => cocoa.color("systemRedColor"),
+    };
+    objc.send(void, block, "setBackgroundColor:", .{color});
+    const title = switch (alert) {
+        .none => unreachable,
+        .note => "Note",
+        .tip => "Tip",
+        .important => "Important",
+        .warning => "Warning",
+        .caution => "Caution",
+    };
+    const title_attributes = builder.attributes(.{ .bold = true });
+    dictionary_set(title_attributes, cocoa.NSForegroundColorAttributeName, color);
+    builder.paragraph_start = builder.length();
+    builder.append(title, title_attributes);
+    builder.paragraph_end(.{ .before = builder.gap(), .font_style = .{ .bold = true } });
+    builder.gap_small_next = true;
 }
 
 fn item_begin(builder: *Builder, task: markdown.Task) void {
@@ -685,6 +753,61 @@ fn item_begin(builder: *Builder, task: markdown.Task) void {
     builder.marker_pending = true;
     builder.marker_task = task;
     builder.block_first = true;
+}
+
+/// A footnote definition is shown as a one-item ordered list that starts at its number.
+fn footnote_begin(builder: *Builder, number: u32) void {
+    assert(number >= 1 and number <= markdown.footnotes_max);
+    builder.marker_flush();
+    builder.content.footnote_locations[number - 1] = builder.length();
+    builder.frame_push(.{ .list = .{
+        .ordered = true,
+        .number = number,
+        .tight = false,
+        .item_count = 0,
+    } });
+    item_begin(builder, .none);
+}
+
+/// Ends a footnote with a link back to its first reference, on its last paragraph.
+fn footnote_end(builder: *Builder) void {
+    assert(builder.frame_count >= 2);
+    assert(builder.frames[builder.frame_count - 1] == .item);
+    const number = builder.frames[builder.frame_count - 2].list.number;
+    var buffer: [32]u8 = undefined;
+    assert(builder.link == null);
+    builder.link = cocoa.string(std.fmt.bufPrint(&buffer, "#fnref-{d}", .{number}) catch {
+        unreachable;
+    });
+    const back_attributes = builder.attributes(.{});
+    builder.link = null;
+    const back = " \u{21A9}\u{FE0E}";
+    const end = builder.length();
+    if (!builder.marker_pending and builder.paragraph_end_location == end) {
+        assert(end > 0);
+        const style = objc.send(
+            ?Id,
+            builder.storage,
+            "attribute:atIndex:effectiveRange:",
+            .{ cocoa.NSParagraphStyleAttributeName, end - 1, @as(?*cocoa.Range, null) },
+        );
+        if (style) |paragraph_style| {
+            dictionary_set(back_attributes, cocoa.NSParagraphStyleAttributeName, paragraph_style);
+        }
+        const piece = objc.autorelease(objc.send(
+            Id,
+            objc.alloc("NSAttributedString"),
+            "initWithString:attributes:",
+            .{ cocoa.string(back), back_attributes },
+        ));
+        objc.send(void, builder.storage, "insertAttributedString:atIndex:", .{ piece, end - 1 });
+    } else {
+        builder.text_marker = builder.text_block_begin();
+        builder.append(back, back_attributes);
+        builder.text_block_end(builder.gap(), 0);
+    }
+    container_end(builder);
+    container_end(builder);
 }
 
 fn heading_end(builder: *Builder) void {
@@ -994,6 +1117,7 @@ fn inline_apply(builder: *Builder, event: markdown.Event) void {
         .soft_break => builder.append_text(" "),
         // A line separator breaks the line and stays inside the paragraph.
         .hard_break => builder.append_text("\u{2028}"),
+        .footnote_reference => |number| footnote_reference_add(builder, number),
         .emphasis_start => builder.italic_depth += 1,
         .emphasis_end => builder.italic_depth -= 1,
         .strong_start => builder.bold_depth += 1,
@@ -1002,7 +1126,7 @@ fn inline_apply(builder: *Builder, event: markdown.Event) void {
         .strike_end => builder.strike_depth -= 1,
         .link_start => |destination| builder.link = cocoa.string(destination),
         .link_end => builder.link = null,
-        .image_start => |source| image_begin(builder, source),
+        .image_start => |image| image_begin(builder, image),
         .image_end => if (builder.image_link) {
             builder.image_link = false;
             builder.link = null;
@@ -1011,7 +1135,28 @@ fn inline_apply(builder: *Builder, event: markdown.Event) void {
     }
 }
 
-fn image_begin(builder: *Builder, source: []const u8) void {
+/// Adds a raised footnote number that links to the footnote.
+fn footnote_reference_add(builder: *Builder, number: u32) void {
+    assert(number >= 1 and number <= markdown.footnotes_max);
+    const locations = &builder.content.footnote_reference_locations;
+    if (locations[number - 1] == location_none) locations[number - 1] = builder.length();
+    var buffer: [32]u8 = undefined;
+    const link = builder.link;
+    builder.link = cocoa.string(std.fmt.bufPrint(&buffer, "#fn-{d}", .{number}) catch {
+        unreachable;
+    });
+    var style = builder.style_current();
+    style.size = font_size_note;
+    const reference_attributes = builder.attributes(style);
+    builder.link = link;
+    const offset: isize = @intFromFloat(@round(builder.scaled(size_body * 0.35)));
+    dictionary_set(reference_attributes, cocoa.NSBaselineOffsetAttributeName, cocoa.number(offset));
+    const text = std.fmt.bufPrint(&buffer, "{d}", .{number}) catch unreachable;
+    builder.append(text, reference_attributes);
+}
+
+fn image_begin(builder: *Builder, image_event: markdown.Image) void {
+    const source = image_event.source;
     const image = image_load(builder, source) orelse {
         // Show the alternative text instead, as a link to the image when it has no link yet.
         if (builder.link == null) {
@@ -1020,7 +1165,19 @@ fn image_begin(builder: *Builder, source: []const u8) void {
         }
         return;
     };
-    const size = objc.send(cocoa.Size, image, "size", .{});
+    const natural = objc.send(cocoa.Size, image, "size", .{});
+    assert(natural.width >= 1 and natural.height >= 1);
+    const width: f64 = @floatFromInt(image_event.width);
+    const height: f64 = @floatFromInt(image_event.height);
+    // With one dimension given, the other keeps the aspect ratio.
+    const size: cocoa.Size = if (width > 0 and height > 0)
+        .{ .width = width, .height = height }
+    else if (width > 0)
+        .{ .width = width, .height = natural.height * width / natural.width }
+    else if (height > 0)
+        .{ .width = natural.width * height / natural.height, .height = height }
+    else
+        natural;
     const scale = @min(1, builder.scaled(column_width - 80) / size.width);
     const attachment = objc.new("NSTextAttachment");
     objc.send(void, attachment, "setImage:", .{image});
