@@ -1343,7 +1343,7 @@ const Layout = struct {
         try layout.canvas.add(.{ .text = .{
             .origin = .{ .x = extent.left + tab_width / 2, .y = top + header_height / 2 },
             .font = .bold,
-            .bytes = @tagName(data.kind),
+            .bytes = try layout.canvas.out.text_add(@tagName(data.kind)),
         } });
         const label_x = extent.left + tab_width + frame_label_gap;
         try layout.condition_emit(data.label, label_x, top, header_height, .start);
