@@ -323,8 +323,12 @@ fn outline_selection_changed(_: Id, _: Selector, notification: Id) callconv(.c) 
     document.heading_show(shown, @intCast(row));
 }
 
+/// Schemes that a click may hand to another application. A document is untrusted input, so a
+/// link must not be able to start an arbitrary URL handler.
+const schemes_allowed = [_][]const u8{ "http", "https", "mailto" };
+
 /// Links inside the document scroll to their heading, links to other Markdown files open in the
-/// viewer, and everything else goes to the system's default application.
+/// viewer, and web and mail links go to the default application.
 fn link_clicked(_: Id, _: Selector, text_view: ?Id, link: Id, _: usize) callconv(.c) bool {
     const shown = document.find(.text_view, text_view) orelse return false;
     const is_string = objc.send(bool, link, "isKindOfClass:", .{objc.class("NSString")});
@@ -335,34 +339,40 @@ fn link_clicked(_: Id, _: Selector, text_view: ?Id, link: Id, _: usize) callconv
         _ = document.anchor_show(shown, destination[1..]);
         return true;
     }
-    const workspace = objc.send(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     const scheme_end = std.mem.indexOfScalar(u8, destination, ':');
     const path_end = std.mem.indexOfAny(u8, destination, "/?#") orelse destination.len;
     if (scheme_end != null and scheme_end.? < path_end) {
-        const url = objc.send(?Id, objc.class("NSURL"), "URLWithString:", .{link}) orelse {
+        const scheme = destination[0..scheme_end.?];
+        if (std.ascii.eqlIgnoreCase(scheme, "file")) {
+            const path_start = if (std.mem.startsWith(u8, destination[scheme.len..], "://"))
+                scheme.len + 3
+            else
+                scheme.len + 1;
+            file_link_open(shown, destination[path_start..]);
             return true;
-        };
-        _ = objc.send(bool, workspace, "openURL:", .{url});
+        }
+        for (schemes_allowed) |allowed| {
+            if (std.ascii.eqlIgnoreCase(scheme, allowed)) url_open(link);
+        }
         return true;
     }
     if (std.mem.indexOfScalar(u8, destination, '@') != null and path_end == destination.len) {
-        const address = objc.send(
-            Id,
-            cocoa.string("mailto:"),
-            "stringByAppendingString:",
-            .{link},
-        );
-        const url = objc.send(?Id, objc.class("NSURL"), "URLWithString:", .{address}) orelse {
-            return true;
-        };
-        _ = objc.send(bool, workspace, "openURL:", .{url});
+        url_open(objc.send(Id, cocoa.string("mailto:"), "stringByAppendingString:", .{link}));
         return true;
     }
     file_link_open(shown, destination);
     return true;
 }
 
-/// Opens a link to a local file, relative to the directory of the document.
+fn url_open(address: Id) void {
+    const url = objc.send(?Id, objc.class("NSURL"), "URLWithString:", .{address}) orelse return;
+    const workspace = objc.send(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
+    _ = objc.send(bool, workspace, "openURL:", .{url});
+}
+
+/// Follows a link to a local file, relative to the directory of the document. A Markdown file
+/// opens in the viewer. Any other file is shown in Finder and not opened: opening it would let
+/// a document run a script or an application with one click.
 fn file_link_open(shown: *document.Document, destination: []const u8) void {
     const path_end = std.mem.indexOfAny(u8, destination, "?#") orelse destination.len;
     if (path_end == 0) return;
@@ -385,7 +395,7 @@ fn file_link_open(shown: *document.Document, destination: []const u8) void {
     }
     const workspace = objc.send(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     const url = objc.send(Id, objc.class("NSURL"), "fileURLWithPath:", .{file_path});
-    _ = objc.send(bool, workspace, "openURL:", .{url});
+    objc.send(void, workspace, "activateFileViewerSelectingURLs:", .{cocoa.array(&.{url})});
 }
 
 // Toolbar.

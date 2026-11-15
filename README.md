@@ -29,8 +29,9 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
 - Lists the headings in a sidebar. Select one to go to it.
 - Follows the system appearance and accent color.
 - Find, copy, print and zoom work on the whole document, diagrams included.
-- Links to headings scroll, links to other Markdown files open in Minied, and other links go to
-  the default application.
+- Links to headings scroll, links to other Markdown files open in Minied, and web and mail
+  links go to the default application. A link to any other local file shows the file in Finder
+  and does not open it, so a document cannot run a script with one click.
 
 Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough and
 autolinks. Raw HTML is shown as text. Images load from local files only: Minied never uses the
