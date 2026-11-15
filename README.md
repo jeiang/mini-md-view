@@ -73,7 +73,9 @@ tree-sitter and the grammars are in the app bundle, in `Contents/Resources/licen
 | `src/scene.zig` | The display list: shapes, lines and text with semantic colors |
 | `src/render.zig` | Events to an attributed string for TextKit |
 | `src/canvas.zig` | Display list to CoreGraphics, as a text attachment |
+| `src/remote.zig`, `src/address.zig` | Remote images: which addresses, approval and fetching |
 | `src/document.zig` | The document pool, windows, loading and reloading |
+| `src/history.zig` | The files and scroll positions that a window showed |
 | `src/main.zig` | Application delegate, menus, toolbar |
 | `src/objc.zig`, `src/cocoa.zig` | Objective-C runtime bindings |
 
@@ -88,6 +90,9 @@ allocates with malloc, so highlighting has limits of size and time instead.
 | Block nesting depth | 16 |
 | Diagrams per document | 64 |
 | Headings in the sidebar | 2048 |
+| Footnotes | 256 |
+| Back and Forward steps per window | 32 |
+| Remote image | 16 MB, 64 million pixels |
 | Highlighted code block | 32 KB |
 | Colored spans per code block | 16384 |
 | Highlighting time | 0.1 s per block, 1 s per document |
