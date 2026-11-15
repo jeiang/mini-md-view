@@ -433,6 +433,7 @@ fn sidebar_create(document: *Document, controller: Id) Id {
     const scroll_view = objc.new("NSScrollView");
     objc.send(void, scroll_view, "setDrawsBackground:", .{false});
     objc.send(void, scroll_view, "setHasVerticalScroller:", .{true});
+    objc.send(void, scroll_view, "setAutohidesScrollers:", .{true});
     objc.send(void, scroll_view, "setDocumentView:", .{table});
     objc.send(void, scroll_view, "setFrame:", .{cocoa.Rect.init(0, 0, 240, 600)});
     return scroll_view;
@@ -484,6 +485,7 @@ fn content_create(document: *Document, controller: Id) Id {
 
     const scroll_view = objc.send(Id, objc.alloc("NSScrollView"), "initWithFrame:", .{frame});
     objc.send(void, scroll_view, "setHasVerticalScroller:", .{true});
+    objc.send(void, scroll_view, "setAutohidesScrollers:", .{true});
     objc.send(void, scroll_view, "setDrawsBackground:", .{false});
     objc.send(void, scroll_view, "setDocumentView:", .{text_view});
     document.text_storage = text_storage;
