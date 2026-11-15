@@ -3,6 +3,7 @@
 
 test {
     _ = @import("markdown.zig");
+    _ = @import("history.zig");
     _ = @import("mermaid.zig");
     _ = @import("highlight.zig");
 }

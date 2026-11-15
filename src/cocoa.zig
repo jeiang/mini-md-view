@@ -38,10 +38,13 @@ pub extern const NSCursorAttributeName: Id;
 pub extern const NSBaselineOffsetAttributeName: Id;
 
 pub extern const NSViewFrameDidChangeNotification: Id;
+pub extern const NSViewBoundsDidChangeNotification: Id;
 pub extern const NSToolbarToggleSidebarItemIdentifier: Id;
 pub extern const NSToolbarSidebarTrackingSeparatorItemIdentifier: Id;
 pub extern const NSToolbarFlexibleSpaceItemIdentifier: Id;
 pub extern const NSDefaultRunLoopMode: Id;
+pub extern const NSPasteboardTypeFileURL: Id;
+pub extern const NSPasteboardURLReadingFileURLsOnlyKey: Id;
 
 /// NSTextAlignment. Apple Silicon uses the iOS values, where center is 1 and right is 2.
 pub const TextAlignment = enum(isize) { left = 0, center = 1, right = 2, natural = 4 };
@@ -51,6 +54,44 @@ pub const Edge = enum(usize) { x_min = 0, y_min = 1, x_max = 2, y_max = 3 };
 
 /// NSTextBlockLayer.
 pub const BlockLayer = enum(isize) { padding = -1, border = 0, margin = 1 };
+
+pub const EventStream = *opaque {};
+pub const EventStreamContext = extern struct {
+    version: isize = 0,
+    info: ?*anyopaque,
+    retain: ?*const anyopaque = null,
+    release: ?*const anyopaque = null,
+    copy_description: ?*const anyopaque = null,
+};
+pub const EventStreamCallback = *const fn (
+    stream: EventStream,
+    info: ?*anyopaque,
+    event_count: usize,
+    event_paths: *anyopaque,
+    event_flags: [*]const u32,
+    event_ids: [*]const u64,
+) callconv(.c) void;
+/// kFSEventStreamEventIdSinceNow.
+pub const event_id_since_now: u64 = 0xFFFFFFFFFFFFFFFF;
+/// kFSEventStreamCreateFlagFileEvents.
+pub const event_stream_flag_file_events: u32 = 0x10;
+
+pub extern "c" fn FSEventStreamCreate(
+    allocator: ?*anyopaque,
+    callback: EventStreamCallback,
+    context: *const EventStreamContext,
+    paths: Id,
+    since_when: u64,
+    latency: f64,
+    flags: u32,
+) ?EventStream;
+pub extern "c" fn FSEventStreamSetDispatchQueue(stream: EventStream, queue: ?*anyopaque) void;
+pub extern "c" fn FSEventStreamStart(stream: EventStream) bool;
+pub extern "c" fn FSEventStreamStop(stream: EventStream) void;
+pub extern "c" fn FSEventStreamInvalidate(stream: EventStream) void;
+pub extern "c" fn FSEventStreamRelease(stream: EventStream) void;
+/// The main dispatch queue, which `dispatch_get_main_queue` returns.
+pub extern "c" var _dispatch_main_q: opaque {};
 
 pub const Context = *opaque {};
 pub const Path = *opaque {};

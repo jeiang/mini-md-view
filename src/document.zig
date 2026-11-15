@@ -13,36 +13,52 @@ const objc = @import("objc.zig");
 const cocoa = @import("cocoa.zig");
 const markdown = @import("markdown.zig");
 const render = @import("render.zig");
+const history = @import("history.zig");
 const Id = objc.Id;
 
 pub const documents_max = 8;
-const path_size_max = 1024;
 const scratch_size = 8 * 1024 * 1024;
 const zoom_min = 0.6;
 const zoom_max = 3.0;
 const zoom_step = 1.1;
 const inset_min = 28;
+/// Space between the top of the visible area and a heading that the outline scrolled to.
+const heading_margin = 16;
 
 pub const Document = struct {
     open: bool,
-    path_buffer: [path_size_max]u8,
-    path_length: u32,
+    /// The files that the window showed. The current entry is the file that it shows.
+    history: history.History,
     window: Id,
     scroll_view: Id,
     text_view: Id,
     /// Owns the text system: the layout manager, the container, and through them the text.
     text_storage: Id,
     outline_view: Id,
-    zoom: f64,
     /// Modification time of the file when it was last loaded, in seconds.
     modified: f64,
     /// Smallest heading level in the document, which the outline shows without indentation.
     heading_level_min: u8,
+    word_count: u32,
+    /// The bytes of the last successful load. A zoom step renders them again.
+    source_buffer: [markdown.source_size_max]u8,
+    source_length: u32,
+    /// Watches the directory of the file. Null when no stream could be started.
+    stream: ?cocoa.EventStream,
+    /// Why the last reload failed. The subtitle says it in place of the word count, until a
+    /// load succeeds.
+    notice: ?LoadError,
+    /// The outline row that a click selected. It stays selected while the scroll position that
+    /// the click gave stays, even when the heading cannot reach the top of the visible area.
+    heading_clicked: ?u32,
+    heading_clicked_scroll: f64,
+    /// The outline selection changes because of scrolling, not because of the user.
+    outline_selecting: bool,
     content: render.Content,
 
     pub fn path(document: *const Document) []const u8 {
         assert(document.open);
-        return document.path_buffer[0..document.path_length];
+        return document.history.current_path();
     }
 };
 
@@ -62,9 +78,18 @@ pub const LoadError = error{
 var documents: [documents_max]Document = undefined;
 var parse_storage: markdown.Storage = undefined;
 var scratch: [scratch_size]u8 align(16) = undefined;
+/// The zoom of every window. It is saved in the user defaults.
+var zoom_level: f64 = 1;
+const zoom_key = "Zoom";
 
 pub fn init() void {
     for (&documents) |*document| document.open = false;
+    const saved = objc.send(f64, defaults(), "doubleForKey:", .{cocoa.string(zoom_key)});
+    if (saved >= zoom_min and saved <= zoom_max) zoom_level = saved;
+}
+
+fn defaults() Id {
+    return objc.send(Id, objc.class("NSUserDefaults"), "standardUserDefaults", .{});
 }
 
 pub fn open_count() u32 {
@@ -95,7 +120,7 @@ pub fn current() ?*Document {
 /// Opens the file in a new window, or brings its window to the front when it is already open.
 pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     assert(file_path.len > 0);
-    if (file_path.len > path_size_max) return error.PathTooLong;
+    if (file_path.len > history.path_size_max) return error.PathTooLong;
     for (&documents) |*document| {
         if (document.open and std.mem.eql(u8, document.path(), file_path)) {
             objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
@@ -106,26 +131,136 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
         if (!candidate.open) break candidate;
     } else return error.TooManyDocuments;
 
-    @memcpy(document.path_buffer[0..file_path.len], file_path);
-    document.path_length = @intCast(file_path.len);
-    document.zoom = 1;
-    document.modified = 0;
+    document.history.reset();
+    document.history.push(file_path);
     document.content.reset();
+    document.stream = null;
+    document.notice = null;
+    document.outline_selecting = false;
+    document.heading_clicked = null;
     window_create(document, controller);
     document.open = true;
-    load(document) catch |err| {
+    document.modified = file_read(document, cocoa.string(file_path)) catch |err| {
         objc.send(void, document.window, "close", .{});
         assert(!document.open);
         return err;
     };
+    path_shown(document, null);
     inset_update(document);
     objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
+}
+
+/// Shows another file in the window and adds it to the history. Then scrolls to the heading that
+/// `fragment` names, if any. On error, the window is unchanged.
+pub fn navigate(document: *Document, file_path: []const u8, fragment: []const u8) OpenError!void {
+    assert(document.open);
+    assert(file_path.len > 0);
+    if (file_path.len > history.path_size_max) return error.PathTooLong;
+    const modified = try file_read(document, cocoa.string(file_path));
+    document.modified = modified;
+    document.history.current().scroll = scroll_get(document);
+    document.history.push(file_path);
+    const insets = objc.send(cocoa.EdgeInsets, document.scroll_view, "contentInsets", .{});
+    path_shown(document, -insets.top);
+    if (fragment.len > 0) _ = anchor_show(document, fragment);
+}
+
+/// Goes one step back or forward in the history, to the scroll position that the entry had. On
+/// error, the window is unchanged.
+pub fn history_go(document: *Document, direction: history.Direction) LoadError!void {
+    assert(document.open);
+    const target = document.history.peek(direction) orelse return;
+    const scroll = scroll_get(document);
+    if (std.mem.eql(u8, target.path(), document.path())) {
+        document.history.current().scroll = scroll;
+        document.history.move(direction);
+        scroll_set(document, target.scroll);
+        return;
+    }
+    document.modified = try file_read(document, cocoa.string(target.path()));
+    document.history.current().scroll = scroll;
+    document.history.move(direction);
+    path_shown(document, target.scroll);
+}
+
+/// The path of the history entry one step in the direction, or null when there is none.
+pub fn history_peek(document: *Document, direction: history.Direction) ?[]const u8 {
+    assert(document.open);
+    const entry = document.history.peek(direction) orelse return null;
+    return entry.path();
+}
+
+/// Scrolls to the heading that a `#fragment` link names, and adds the new position to the
+/// history.
+pub fn fragment_follow(document: *Document, fragment: []const u8) void {
+    assert(document.open);
+    const scroll = scroll_get(document);
+    if (!anchor_show(document, fragment)) return;
+    document.history.current().scroll = scroll;
+    document.history.push(document.path());
+}
+
+/// Shows the file of the current history entry from the kept bytes, and makes the watcher, the
+/// recent documents and the stored set follow it.
+fn path_shown(document: *Document, scroll: ?f64) void {
+    show(document, scroll);
+    watch_start(document);
+    recent_note(document);
+    paths_store();
+}
+
+/// The document whose window has the toolbar.
+pub fn find_toolbar(toolbar: ?Id) ?*Document {
+    const wanted = toolbar orelse return null;
+    for (&documents) |*document| {
+        if (!document.open) continue;
+        if (objc.send(?Id, document.window, "toolbar", .{}) == wanted) return document;
+    }
+    return null;
+}
+
+/// Adds the file to File > Open Recent.
+fn recent_note(document: *const Document) void {
+    const url = objc.send(Id, objc.class("NSURL"), "fileURLWithPath:", .{
+        cocoa.string(document.path()),
+    });
+    const class = objc.class("NSDocumentController");
+    const controller = objc.send(Id, class, "sharedDocumentController", .{});
+    objc.send(void, controller, "noteNewRecentDocumentURL:", .{url});
+}
+
+const paths_key = "OpenDocuments";
+
+/// Saves the paths of the open documents, which the next launch opens again.
+pub fn paths_store() void {
+    const paths = objc.new("NSMutableArray");
+    for (&documents) |*document| {
+        if (document.open) objc.send(void, paths, "addObject:", .{cocoa.string(document.path())});
+    }
+    objc.send(void, defaults(), "setObject:forKey:", .{ paths, cocoa.string(paths_key) });
+}
+
+/// Opens the documents that were open when the app quit. Files that cannot be opened any more
+/// are skipped without an alert.
+pub fn reopen(controller: Id) void {
+    const key = cocoa.string(paths_key);
+    const stored = objc.send(?Id, defaults(), "stringArrayForKey:", .{key}) orelse return;
+    // Each open stores the paths again, which replaces the array in the defaults.
+    const paths = objc.autorelease(objc.retain(stored));
+    const count = objc.send(usize, paths, "count", .{});
+    for (0..@min(count, documents_max)) |index| {
+        const file_path = cocoa.string_bytes(objc.send(Id, paths, "objectAtIndex:", .{index}));
+        if (file_path.len == 0) continue;
+        open(file_path, controller) catch {};
+    }
+    paths_store();
 }
 
 /// Releases the document's objects. The controller calls this when the window closes.
 pub fn close(document: *Document) void {
     assert(document.open);
     document.open = false;
+    watch_stop(document);
     const center = objc.send(Id, objc.class("NSNotificationCenter"), "defaultCenter", .{});
     const controller = objc.send(?Id, document.window, "delegate", .{});
     if (controller) |observer| {
@@ -133,6 +268,11 @@ pub fn close(document: *Document) void {
             observer,
             cocoa.NSViewFrameDidChangeNotification,
             document.scroll_view,
+        });
+        objc.send(void, center, "removeObserver:name:object:", .{
+            observer,
+            cocoa.NSViewBoundsDidChangeNotification,
+            objc.send(Id, document.scroll_view, "contentView", .{}),
         });
     }
     objc.send(void, document.window, "setDelegate:", .{@as(?Id, null)});
@@ -149,61 +289,121 @@ pub fn close(document: *Document) void {
     _ = objc.autorelease(document.window);
 }
 
+/// The modification time of the file, or of the file that a symbolic link leads to.
 fn file_modified(file_path: Id) ?f64 {
     const manager = objc.send(Id, objc.class("NSFileManager"), "defaultManager", .{});
     const attributes = objc.send(
         ?Id,
         manager,
         "attributesOfItemAtPath:error:",
-        .{ file_path, @as(?*?Id, null) },
+        .{
+            objc.send(Id, file_path, "stringByResolvingSymlinksInPath", .{}),
+            @as(?*?Id, null),
+        },
     ) orelse return null;
     const date = objc.send(?Id, attributes, "fileModificationDate", .{}) orelse return null;
     return objc.send(f64, date, "timeIntervalSinceReferenceDate", .{});
 }
 
-/// Reloads the document when its file changed on disk. A file that cannot be read right now,
-/// for example in the middle of an editor's save, leaves the current view in place.
-pub fn refresh(document: *Document) void {
+/// Reloads the document when its file changed on disk. When the new file cannot be shown, the
+/// old content stays and the subtitle gives the reason. A notice is checked again on every
+/// change in the directory, so that it goes away once an editor's save completes.
+fn refresh(document: *Document) void {
     assert(document.open);
-    const modified = file_modified(cocoa.string(document.path())) orelse return;
-    if (modified == document.modified) return;
-    load(document) catch {};
+    const modified = file_modified(cocoa.string(document.path()));
+    if (modified == document.modified and document.notice == null) return;
+    reload(document) catch |err| {
+        document.notice = err;
+        title_update(document);
+    };
 }
 
-pub fn refresh_all() void {
-    for (&documents) |*document| {
-        if (document.open) refresh(document);
+/// Watches the directory of the file rather than the file itself: editors often save by
+/// writing a new file and renaming it over the old one, which a watch on the file would lose.
+fn watch_start(document: *Document) void {
+    assert(document.open);
+    watch_stop(document);
+    const file_path = cocoa.string(document.path());
+    const resolved = objc.send(Id, file_path, "stringByResolvingSymlinksInPath", .{});
+    const directory = objc.send(Id, resolved, "stringByDeletingLastPathComponent", .{});
+    const latency_seconds = 0.15;
+    const stream = cocoa.FSEventStreamCreate(
+        null,
+        &watch_changed,
+        &.{ .info = document },
+        cocoa.array(&.{directory}),
+        cocoa.event_id_since_now,
+        latency_seconds,
+        cocoa.event_stream_flag_file_events,
+    ) orelse return;
+    cocoa.FSEventStreamSetDispatchQueue(stream, &cocoa._dispatch_main_q);
+    if (!cocoa.FSEventStreamStart(stream)) {
+        cocoa.FSEventStreamInvalidate(stream);
+        cocoa.FSEventStreamRelease(stream);
+        return;
     }
+    document.stream = stream;
 }
 
+fn watch_stop(document: *Document) void {
+    const stream = document.stream orelse return;
+    cocoa.FSEventStreamStop(stream);
+    cocoa.FSEventStreamInvalidate(stream);
+    cocoa.FSEventStreamRelease(stream);
+    document.stream = null;
+}
+
+fn watch_changed(
+    stream: cocoa.EventStream,
+    info: ?*anyopaque,
+    _: usize,
+    _: *anyopaque,
+    _: [*]const u32,
+    _: [*]const u64,
+) callconv(.c) void {
+    const document: *Document = @ptrCast(@alignCast(info.?));
+    // A callback can be queued just before its stream stops.
+    if (!document.open or document.stream != stream) return;
+    refresh(document);
+}
+
+/// Reads the file again and shows it at the same scroll position. On error, the view is
+/// unchanged.
 pub fn reload(document: *Document) LoadError!void {
     assert(document.open);
-    try load(document);
+    document.modified = try file_read(document, cocoa.string(document.path()));
+    show(document, scroll_get(document));
+}
+
+/// Renders the kept bytes again, for example after a zoom step, and keeps the scroll position.
+pub fn rerender(document: *Document) void {
+    assert(document.open);
+    show(document, scroll_get(document));
 }
 
 pub const ZoomChange = enum { in, out, reset };
 
-pub fn zoom(document: *Document, change: ZoomChange) void {
-    assert(document.open);
+/// Changes the zoom of every window and saves it.
+pub fn zoom(change: ZoomChange) void {
     const zoom_new = switch (change) {
-        .in => @min(zoom_max, document.zoom * zoom_step),
-        .out => @max(zoom_min, document.zoom / zoom_step),
+        .in => @min(zoom_max, zoom_level * zoom_step),
+        .out => @max(zoom_min, zoom_level / zoom_step),
         .reset => 1,
     };
-    if (zoom_new == document.zoom) return;
-    const zoom_old = document.zoom;
-    document.zoom = zoom_new;
-    load(document) catch {
-        document.zoom = zoom_old;
-        return;
-    };
-    inset_update(document);
+    if (zoom_new == zoom_level) return;
+    zoom_level = zoom_new;
+    objc.send(void, defaults(), "setDouble:forKey:", .{ zoom_level, cocoa.string(zoom_key) });
+    for (&documents) |*document| {
+        if (!document.open) continue;
+        rerender(document);
+        inset_update(document);
+    }
 }
 
-/// Reads, parses and renders the file, and shows the result. On error, the view is unchanged.
-fn load(document: *Document) LoadError!void {
+/// Reads the file into the kept bytes of the document and returns its modification time. On
+/// error, the kept bytes are unchanged.
+fn file_read(document: *Document, file_path: Id) LoadError!f64 {
     assert(document.open);
-    const file_path = cocoa.string(document.path());
     const modified = file_modified(file_path) orelse return error.Unreadable;
     const data = objc.send(
         ?Id,
@@ -219,52 +419,79 @@ fn load(document: *Document) LoadError!void {
     if (size > 0) source = objc.send([*]const u8, data, "bytes", .{})[0..size];
     if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) source = source[3..];
     if (!std.unicode.utf8ValidateSlice(source)) return error.NotText;
+    @memcpy(document.source_buffer[0..source.len], source);
+    document.source_length = @intCast(source.len);
+    document.notice = null;
+    return modified;
+}
 
-    const clip_view = objc.send(Id, document.scroll_view, "contentView", .{});
-    const scroll_origin = objc.send(cocoa.Rect, clip_view, "bounds", .{}).origin;
-    const first_load = document.modified == 0;
-
+/// Parses and renders the kept bytes and shows the result. Then scrolls to `scroll`, the
+/// vertical origin of the visible area, unless it is null.
+fn show(document: *Document, scroll: ?f64) void {
+    assert(document.open);
+    assert(document.source_length <= markdown.source_size_max);
+    const file_path = cocoa.string(document.path());
     // The old attributed string points into `content`, so it goes away before the rebuild.
     const empty = objc.new("NSAttributedString");
     objc.send(void, document.text_storage, "setAttributedString:", .{empty});
-    const parsed = markdown.parse(&parse_storage, source);
+    const parsed = markdown.parse(
+        &parse_storage,
+        document.source_buffer[0..document.source_length],
+    );
     const attributed = render.build(parsed.events, &document.content, .{
-        .zoom = document.zoom,
+        .zoom = zoom_level,
         .directory = objc.send(Id, file_path, "stringByDeletingLastPathComponent", .{}),
         .scratch = &scratch,
         .truncated = parsed.truncated,
     });
-    objc.send(void, document.text_storage, "setAttributedString:", .{attributed});
-    document.modified = modified;
-
+    // The outline can ask for a row while the text view takes the new text.
     document.heading_level_min = 6;
     for (document.content.headings_slice()) |heading| {
         document.heading_level_min = @min(document.heading_level_min, heading.level);
     }
+    objc.send(void, document.text_storage, "setAttributedString:", .{attributed});
+    document.word_count = parsed.word_count;
     objc.send(void, document.outline_view, "reloadData", .{});
-    title_update(document, file_path, parsed.word_count);
-    if (!first_load) {
-        const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
-        const container = objc.send(Id, document.text_view, "textContainer", .{});
-        objc.send(void, layout_manager, "ensureLayoutForTextContainer:", .{container});
-        objc.send(void, document.text_view, "scrollPoint:", .{scroll_origin});
-    }
+    title_update(document);
+    if (scroll) |y| scroll_set(document, y);
+    document.heading_clicked = null;
+    outline_follow(document);
 }
 
-fn title_update(document: *Document, file_path: Id, word_count: u32) void {
+fn scroll_get(document: *const Document) f64 {
+    const clip_view = objc.send(Id, document.scroll_view, "contentView", .{});
+    return objc.send(cocoa.Rect, clip_view, "bounds", .{}).origin.y;
+}
+
+fn scroll_set(document: *Document, y: f64) void {
+    const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
+    const container = objc.send(Id, document.text_view, "textContainer", .{});
+    objc.send(void, layout_manager, "ensureLayoutForTextContainer:", .{container});
+    objc.send(void, document.text_view, "scrollPoint:", .{cocoa.Point{ .x = 0, .y = y }});
+}
+
+fn title_update(document: *Document) void {
     const window = document.window;
+    const file_path = cocoa.string(document.path());
     objc.send(void, window, "setTitle:", .{objc.send(Id, file_path, "lastPathComponent", .{})});
     const url = objc.send(Id, objc.class("NSURL"), "fileURLWithPath:", .{file_path});
     objc.send(void, window, "setRepresentedURL:", .{url});
-    const words_per_minute = 230;
-    const minutes = @max(1, (word_count + words_per_minute / 2) / words_per_minute);
-    var buffer: [64]u8 = undefined;
-    const subtitle = std.fmt.bufPrint(
-        &buffer,
-        "{d} words · {d} min read",
-        .{ word_count, minutes },
-    ) catch {
-        unreachable;
+    var buffer: [128]u8 = undefined;
+    const subtitle = if (document.notice) |err|
+        std.fmt.bufPrint(&buffer, "Not reloaded: {s}", .{switch (err) {
+            error.Unreadable => "the file does not exist or cannot be read",
+            error.TooLarge => "the file is larger than 4 MB",
+            error.NotText => "the file is not UTF-8 text",
+        }}) catch unreachable
+    else subtitle: {
+        const words_per_minute = 230;
+        const word_count = document.word_count;
+        const minutes = @max(1, (word_count + words_per_minute / 2) / words_per_minute);
+        break :subtitle std.fmt.bufPrint(
+            &buffer,
+            "{d} words · {d} min read",
+            .{ word_count, minutes },
+        ) catch unreachable;
     };
     objc.send(void, window, "setSubtitle:", .{cocoa.string(subtitle)});
 }
@@ -273,7 +500,7 @@ fn title_update(document: *Document, file_path: Id, word_count: u32) void {
 pub fn inset_update(document: *Document) void {
     assert(document.open);
     const width = objc.send(cocoa.Size, document.scroll_view, "contentSize", .{}).width;
-    const column = render.column_width * document.zoom;
+    const column = render.column_width * zoom_level;
     const inset: cocoa.Size = .{
         .width = @floor(@max(inset_min, (width - column) / 2)),
         .height = 24,
@@ -309,9 +536,79 @@ fn location_show(document: *Document, location: usize) void {
     );
     const origin = objc.send(cocoa.Point, document.text_view, "textContainerOrigin", .{});
     const insets = objc.send(cocoa.EdgeInsets, document.scroll_view, "contentInsets", .{});
-    const margin = 16;
-    const target: cocoa.Point = .{ .x = 0, .y = rect.origin.y + origin.y - insets.top - margin };
+    const target: cocoa.Point = .{
+        .x = 0,
+        .y = rect.origin.y + origin.y - insets.top - heading_margin,
+    };
     objc.send(void, document.text_view, "scrollPoint:", .{target});
+}
+
+/// Scrolls to the heading of the outline row that the user selected, and keeps the row selected.
+pub fn heading_click(document: *Document, row: u32) void {
+    assert(document.open);
+    assert(row < document.content.heading_count);
+    heading_show(document, row);
+    document.heading_clicked = row;
+    document.heading_clicked_scroll = scroll_get(document);
+    outline_select(document, row);
+}
+
+/// Selects the outline row of the heading that the top of the visible text belongs to. The
+/// work per call is small, because it runs for every scroll event.
+pub fn outline_follow(document: *Document) void {
+    assert(document.open);
+    if (document.heading_clicked) |row| {
+        if (scroll_get(document) == document.heading_clicked_scroll) {
+            return outline_select(document, row);
+        }
+        document.heading_clicked = null;
+    }
+    outline_select(document, heading_top(document));
+}
+
+/// The last heading at or above the top of the visible text, or null when there is none.
+fn heading_top(document: *Document) ?u32 {
+    const headings = document.content.headings_slice();
+    if (headings.len == 0) return null;
+    const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
+    const container = objc.send(Id, document.text_view, "textContainer", .{});
+    const origin = objc.send(cocoa.Point, document.text_view, "textContainerOrigin", .{});
+    const insets = objc.send(cocoa.EdgeInsets, document.scroll_view, "contentInsets", .{});
+    // One point below where `heading_show` puts a heading, so that the heading counts.
+    const top = scroll_get(document) + insets.top + heading_margin + 1 - origin.y;
+    const glyph = objc.send(
+        usize,
+        layout_manager,
+        "glyphIndexForPoint:inTextContainer:fractionOfDistanceThroughGlyph:",
+        .{ cocoa.Point{ .x = 0, .y = @max(0, top) }, container, @as(?*f64, null) },
+    );
+    const location = objc.send(usize, layout_manager, "characterIndexForGlyphAtIndex:", .{glyph});
+    const count = std.sort.partitionPoint(render.Heading, headings, location, heading_before);
+    if (count == 0) return null;
+    return @intCast(count - 1);
+}
+
+fn heading_before(location: usize, heading: render.Heading) bool {
+    return heading.location <= location;
+}
+
+fn outline_select(document: *Document, row: ?u32) void {
+    const table = document.outline_view;
+    const wanted: isize = if (row) |index| index else -1;
+    if (objc.send(isize, table, "selectedRow", .{}) == wanted) return;
+    // While a render is in progress, the table still shows the old headings.
+    if (wanted >= objc.send(isize, table, "numberOfRows", .{})) return;
+    document.outline_selecting = true;
+    defer document.outline_selecting = false;
+    if (row) |index| {
+        const rows = objc.send(Id, objc.class("NSIndexSet"), "indexSetWithIndex:", .{
+            @as(usize, index),
+        });
+        objc.send(void, table, "selectRowIndexes:byExtendingSelection:", .{ rows, false });
+        objc.send(void, table, "scrollRowToVisible:", .{wanted});
+    } else {
+        objc.send(void, table, "deselectAll:", .{@as(?Id, null)});
+    }
 }
 
 /// Scrolls to the heading or footnote that a `#fragment` link names. Returns whether one matched.
@@ -377,6 +674,10 @@ fn window_create(document: *Document, controller: Id) void {
     objc.send(void, window, "setReleasedWhenClosed:", .{false});
     objc.send(void, window, "setDelegate:", .{controller});
     objc.send(void, window, "setTabbingIdentifier:", .{cocoa.string("MiniMdViewDocument")});
+    // The window passes drags to its delegate, which opens the dropped files.
+    objc.send(void, window, "registerForDraggedTypes:", .{
+        cocoa.array(&.{cocoa.NSPasteboardTypeFileURL}),
+    });
     document.window = window;
 
     const toolbar = objc.autorelease(objc.send(
@@ -422,6 +723,14 @@ fn window_create(document: *Document, controller: Id) void {
         cocoa.NSViewFrameDidChangeNotification,
         document.scroll_view,
     });
+    const clip_view = objc.send(Id, document.scroll_view, "contentView", .{});
+    objc.send(void, clip_view, "setPostsBoundsChangedNotifications:", .{true});
+    objc.send(void, center, "addObserver:selector:name:object:", .{
+        controller,
+        objc.selector("viewBoundsChanged:"),
+        cocoa.NSViewBoundsDidChangeNotification,
+        clip_view,
+    });
 }
 
 fn view_controller(view: Id) Id {
@@ -447,6 +756,8 @@ fn sidebar_create(document: *Document, controller: Id) Id {
     objc.send(void, table, "setFocusRingType:", .{focus_ring_none});
     objc.send(void, table, "setDataSource:", .{controller});
     objc.send(void, table, "setDelegate:", .{controller});
+    objc.send(void, table, "setTarget:", .{controller});
+    objc.send(void, table, "setAction:", .{objc.selector("outlineClicked:")});
     document.outline_view = table;
 
     const scroll_view = objc.new("NSScrollView");

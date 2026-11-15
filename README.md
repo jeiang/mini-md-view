@@ -26,15 +26,22 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
 
 ## What it does
 
-- Opens `.md` files from the Open panel, the command line, the Dock, or Finder's "Open With".
-- Shows up to 8 documents, each in its own window.
-- Reloads a document when its file changes on disk, and keeps the scroll position.
-- Lists the headings in a sidebar. Select one to go to it.
+- Opens `.md` files from the Open panel, the command line, the Dock, Finder's "Open With", or a
+  drop on a window. File > Open Recent lists the documents that you opened last.
+- Shows up to 8 documents, each in its own window. Started without a file, it opens the documents
+  that were open when it quit.
+- Reloads a document when its file changes on disk, and keeps the scroll position. When the new
+  file cannot be shown, the old content stays and the window subtitle says why.
+- Lists the headings in a sidebar. Select one to go to it. As you scroll, the sidebar selects the
+  heading of the section at the top of the window.
 - Follows the system appearance and accent color.
-- Find, copy, print and zoom work on the whole document, diagrams included.
-- Links to headings scroll, links to other Markdown files open in mini-md-view, and web and mail
-  links go to the default application. A link to any other local file shows the file in Finder
-  and does not open it, so a document cannot run a script with one click.
+- Find, copy, print and zoom work on the whole document, diagrams included. The zoom applies to
+  every window, and the viewer remembers it.
+- Links to headings scroll, links to other Markdown files show them in the same window, and web
+  and mail links go to the default application. A link to any other local file shows the file in
+  Finder and does not open it, so a document cannot run a script with one click.
+- Back and Forward (Go menu, Command-[ and Command-], or the toolbar) return to the files and
+  scroll positions that a window showed. Each window keeps its last 32 steps.
 
 Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough, autolinks,
 alerts and footnotes, and YAML front matter. Of raw HTML, comments are hidden, `<br>`,

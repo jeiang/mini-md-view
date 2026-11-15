@@ -5,6 +5,7 @@ const highlight_languages = @import("src/highlight_languages.zig").languages;
 const frameworks = [_][]const u8{
     "AppKit",
     "CoreGraphics",
+    "CoreServices",
     "Foundation",
     "UniformTypeIdentifiers",
 };
