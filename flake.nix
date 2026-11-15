@@ -32,7 +32,10 @@
             mkdir -p $out/Applications
             mv $out/MiniMdView.app $out/Applications/
           '';
-          meta.mainProgram = "mini-md-view";
+          meta = {
+            license = nixpkgs.lib.licenses.mit;
+            mainProgram = "mini-md-view";
+          };
         };
         default = mini-md-view;
       });
