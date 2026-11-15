@@ -1,6 +1,7 @@
 const std = @import("std");
+const highlight_languages = @import("src/highlight_languages.zig").languages;
 
-/// Frameworks that the app links. They are part of macOS: the project has no dependencies.
+/// Frameworks that the app links. They are part of macOS.
 const frameworks = [_][]const u8{
     "AppKit",
     "CoreGraphics",
@@ -12,6 +13,7 @@ const frameworks = [_][]const u8{
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const tree_sitter = tree_sitter_add(b, target, optimize);
 
     const exe = b.addExecutable(.{
         .name = "mini-md-view",
@@ -23,6 +25,8 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.linkSystemLibrary("objc", .{});
     for (frameworks) |framework| exe.root_module.linkFramework(framework, .{});
+    exe.root_module.linkLibrary(tree_sitter.library);
+    exe.root_module.addImport("highlight_queries", tree_sitter.queries);
     // Zig does not search the macOS SDK on its own when it runs inside a Nix shell.
     if (b.graph.environ_map.get("SDKROOT")) |sdk| {
         exe.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
@@ -80,7 +84,8 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
 
-    // The tests cover the parts that do not need AppKit: the Markdown parser and diagram layout.
+    // The tests cover the parts that do not need AppKit: the Markdown parser, diagram layout
+    // and syntax highlighting.
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
@@ -88,6 +93,102 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    tests.root_module.linkLibrary(tree_sitter.library);
+    tests.root_module.addImport("highlight_queries", tree_sitter.queries);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+const TreeSitter = struct {
+    library: *std.Build.Step.Compile,
+    /// The module `highlight_queries`: one joined highlight query per language.
+    queries: *std.Build.Module,
+};
+
+/// Compiles the tree-sitter runtime and the grammars of `src/highlight_languages.zig` from the
+/// fetched packages, embeds their highlight queries, and installs their licenses in the bundle.
+fn tree_sitter_add(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) TreeSitter {
+    // Upstream C is not tested with the undefined behavior sanitizer.
+    const flags = &.{ "-std=c11", "-fno-sanitize=undefined" };
+    const library = b.addLibrary(.{
+        .name = "tree-sitter",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const runtime = package_path(b, "tree_sitter", "lib");
+    library.root_module.addCSourceFile(.{ .file = runtime.path(b, "src/lib.c"), .flags = flags });
+    library.root_module.addIncludePath(runtime.path(b, "include"));
+    library.root_module.addIncludePath(runtime.path(b, "src"));
+    library.root_module.addCMacro("_POSIX_C_SOURCE", "200112L");
+    library.root_module.addCMacro("_DEFAULT_SOURCE", "");
+    library.root_module.addCMacro("_DARWIN_C_SOURCE", "");
+    license_install(b, "tree_sitter");
+
+    const queries = b.addWriteFiles();
+    var queries_source: std.ArrayList(u8) = .empty;
+    queries_source.appendSlice(b.allocator, "pub const sources = [_][]const u8{\n") catch
+        @panic("OOM");
+    for (highlight_languages, 0..) |language, language_index| {
+        const grammar = package_path(b, language.package, language.directory);
+        library.root_module.addCSourceFile(.{
+            .file = grammar.path(b, "src/parser.c"),
+            .flags = flags,
+        });
+        const scanner = grammar.path(b, "src/scanner.c");
+        if (std.Io.Dir.cwd().access(b.graph.io, scanner.cwd_relative, .{})) {
+            library.root_module.addCSourceFile(.{ .file = scanner, .flags = flags });
+        } else |_| {}
+        library.root_module.addIncludePath(grammar.path(b, "src"));
+
+        queries_source.appendSlice(b.allocator, "   ") catch @panic("OOM");
+        for (language.queries, 0..) |query, query_index| {
+            const name = b.fmt("{d}-{d}.scm", .{ language_index, query_index });
+            _ = queries.addCopyFile(package_path(b, query.package, query.path), name);
+            const separator = if (query_index == 0) "" else " ++ \"\\n\" ++";
+            queries_source.appendSlice(b.allocator, b.fmt("{s} @embedFile(\"{s}\")", .{
+                separator,
+                name,
+            })) catch @panic("OOM");
+        }
+        queries_source.appendSlice(b.allocator, ",\n") catch @panic("OOM");
+
+        const first = for (highlight_languages[0..language_index]) |previous| {
+            if (std.mem.eql(u8, previous.package, language.package)) break false;
+        } else true;
+        if (first) license_install(b, language.package);
+    }
+    queries_source.appendSlice(b.allocator, "};\n") catch @panic("OOM");
+    const queries_root = queries.add("queries.zig", queries_source.items);
+    return .{
+        .library = library,
+        .queries = b.createModule(.{ .root_source_file = queries_root }),
+    };
+}
+
+/// A path in a fetched package. `b.dependency` would compile and run the package's build script,
+/// and some grammars ship build scripts that fail under Zig 0.17. The build runner's package
+/// table gives the package directory without them.
+fn package_path(b: *std.Build, package: []const u8, sub_path: []const u8) std.Build.LazyPath {
+    const dependencies = @import("root").dependencies;
+    inline for (dependencies.root_deps) |dependency| {
+        if (std.mem.eql(u8, dependency[0], package)) {
+            const root = @field(dependencies.packages, dependency[1]).build_root;
+            return .{ .cwd_relative = b.pathJoin(&.{ root, sub_path }) };
+        }
+    }
+    std.debug.panic("build.zig.zon has no dependency {s}", .{package});
+}
+
+fn license_install(b: *std.Build, package: []const u8) void {
+    const destination = b.fmt("MiniMdView.app/Contents/Resources/licenses/{s}/LICENSE", .{package});
+    const install = b.addInstallFile(package_path(b, package, "LICENSE"), destination);
+    b.getInstallStep().dependOn(&install.step);
 }
