@@ -23,6 +23,11 @@
           nativeBuildInputs = [ pkgs.zig.hook ];
           # AppKit enables Liquid Glass only for binaries linked against the macOS 26 SDK or newer.
           buildInputs = [ pkgs.apple-sdk_27 ];
+          # nix-darwin links applications from $out/Applications.
+          postInstall = ''
+            mkdir -p $out/Applications
+            mv $out/MiniMdView.app $out/Applications/
+          '';
           meta.mainProgram = "mini-md-view";
         };
         default = mini-md-view;
