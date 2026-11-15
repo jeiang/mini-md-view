@@ -14,7 +14,6 @@ const Id = objc.Id;
 const Selector = objc.Selector;
 
 const extensions = [_][]const u8{ "md", "markdown", "mdown", "mkd", "mdx", "txt" };
-const refresh_interval_seconds = 1.0;
 
 const toolbar_zoom_out = "MiniMdViewZoomOut";
 const toolbar_zoom_in = "MiniMdViewZoomIn";
@@ -96,7 +95,6 @@ fn controller_class() Id {
             .implementation = &toolbar_identifiers,
         },
         .{ .name = toolbar_item, .types = "@@:@@B", .implementation = &toolbar_item_create },
-        .{ .name = "timerFired:", .types = "v@:@", .implementation = &timer_fired },
         .{ .name = frame_changed, .types = "v@:@", .implementation = &view_frame_changed },
     }, false);
 }
@@ -104,18 +102,6 @@ fn controller_class() Id {
 // Application delegate.
 
 fn did_finish_launching(_: Id, _: Selector, _: ?Id) callconv(.c) void {
-    _ = objc.send(
-        Id,
-        objc.class("NSTimer"),
-        "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:",
-        .{
-            @as(f64, refresh_interval_seconds),
-            controller,
-            objc.selector("timerFired:"),
-            @as(?Id, null),
-            true,
-        },
-    );
     arguments_open();
     objc.send(void, app(), "activateIgnoringOtherApps:", .{true});
     if (document.open_count() == 0) open_panel_run();
@@ -159,10 +145,6 @@ fn should_handle_reopen(_: Id, _: Selector, _: ?Id, has_visible_windows: bool) c
 
 fn supports_secure_state(_: Id, _: Selector, _: ?Id) callconv(.c) bool {
     return true;
-}
-
-fn timer_fired(_: Id, _: Selector, _: ?Id) callconv(.c) void {
-    document.refresh_all();
 }
 
 // Opening documents.

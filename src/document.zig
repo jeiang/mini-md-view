@@ -41,6 +41,8 @@ pub const Document = struct {
     /// The bytes of the last successful load. A zoom step renders them again.
     source_buffer: [markdown.source_size_max]u8,
     source_length: u32,
+    /// Watches the directory of the file. Null when no stream could be started.
+    stream: ?cocoa.EventStream,
     content: render.Content,
 
     pub fn path(document: *const Document) []const u8 {
@@ -121,6 +123,7 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     @memcpy(document.path_buffer[0..file_path.len], file_path);
     document.path_length = @intCast(file_path.len);
     document.content.reset();
+    document.stream = null;
     window_create(document, controller);
     document.open = true;
     document.modified = file_read(document, cocoa.string(file_path)) catch |err| {
@@ -129,6 +132,7 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
         return err;
     };
     show(document, null);
+    watch_start(document);
     inset_update(document);
     objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
 }
@@ -137,6 +141,7 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
 pub fn close(document: *Document) void {
     assert(document.open);
     document.open = false;
+    watch_stop(document);
     const center = objc.send(Id, objc.class("NSNotificationCenter"), "defaultCenter", .{});
     const controller = objc.send(?Id, document.window, "delegate", .{});
     if (controller) |observer| {
@@ -174,17 +179,60 @@ fn file_modified(file_path: Id) ?f64 {
 
 /// Reloads the document when its file changed on disk. A file that cannot be read right now,
 /// for example in the middle of an editor's save, leaves the current view in place.
-pub fn refresh(document: *Document) void {
+fn refresh(document: *Document) void {
     assert(document.open);
     const modified = file_modified(cocoa.string(document.path())) orelse return;
     if (modified == document.modified) return;
     reload(document) catch {};
 }
 
-pub fn refresh_all() void {
-    for (&documents) |*document| {
-        if (document.open) refresh(document);
+/// Watches the directory of the file rather than the file itself: editors often save by
+/// writing a new file and renaming it over the old one, which a watch on the file would lose.
+fn watch_start(document: *Document) void {
+    assert(document.open);
+    watch_stop(document);
+    const file_path = cocoa.string(document.path());
+    const resolved = objc.send(Id, file_path, "stringByResolvingSymlinksInPath", .{});
+    const directory = objc.send(Id, resolved, "stringByDeletingLastPathComponent", .{});
+    const latency_seconds = 0.15;
+    const stream = cocoa.FSEventStreamCreate(
+        null,
+        &watch_changed,
+        &.{ .info = document },
+        cocoa.array(&.{directory}),
+        cocoa.event_id_since_now,
+        latency_seconds,
+        cocoa.event_stream_flag_file_events,
+    ) orelse return;
+    cocoa.FSEventStreamSetDispatchQueue(stream, &cocoa._dispatch_main_q);
+    if (!cocoa.FSEventStreamStart(stream)) {
+        cocoa.FSEventStreamInvalidate(stream);
+        cocoa.FSEventStreamRelease(stream);
+        return;
     }
+    document.stream = stream;
+}
+
+fn watch_stop(document: *Document) void {
+    const stream = document.stream orelse return;
+    cocoa.FSEventStreamStop(stream);
+    cocoa.FSEventStreamInvalidate(stream);
+    cocoa.FSEventStreamRelease(stream);
+    document.stream = null;
+}
+
+fn watch_changed(
+    stream: cocoa.EventStream,
+    info: ?*anyopaque,
+    _: usize,
+    _: *anyopaque,
+    _: [*]const u32,
+    _: [*]const u64,
+) callconv(.c) void {
+    const document: *Document = @ptrCast(@alignCast(info.?));
+    // A callback can be queued just before its stream stops.
+    if (!document.open or document.stream != stream) return;
+    refresh(document);
 }
 
 /// Reads the file again and shows it at the same scroll position. On error, the view is

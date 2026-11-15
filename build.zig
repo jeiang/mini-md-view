@@ -4,6 +4,7 @@ const std = @import("std");
 const frameworks = [_][]const u8{
     "AppKit",
     "CoreGraphics",
+    "CoreServices",
     "Foundation",
     "UniformTypeIdentifiers",
 };
