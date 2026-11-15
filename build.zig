@@ -39,8 +39,27 @@ pub fn build(b: *std.Build) void {
         b.path("assets/Info.plist"),
         "MiniMdView.app/Contents/Info.plist",
     );
+    const bundle_icon = b.addInstallFile(
+        b.path("assets/AppIcon.icns"),
+        "MiniMdView.app/Contents/Resources/AppIcon.icns",
+    );
     b.getInstallStep().dependOn(&bundle_exe.step);
     b.getInstallStep().dependOn(&bundle_plist.step);
+    b.getInstallStep().dependOn(&bundle_icon.step);
+
+    // The icon is drawn by a tool, and its files are committed: a build does not redraw it.
+    const icon_exe = b.addExecutable(.{
+        .name = "icon",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/icon.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .link_libc = true, // For `erfc`, which shapes the shadow.
+        }),
+    });
+    const icon_run = b.addRunArtifact(icon_exe);
+    icon_run.setCwd(b.path("."));
+    b.step("icon", "Redraw assets/icon.png and assets/AppIcon.icns").dependOn(&icon_run.step);
 
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);

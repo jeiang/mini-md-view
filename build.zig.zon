@@ -73,6 +73,7 @@
         "build.zig.zon",
         "src",
         "assets",
+        "tools",
         // For example...
         //"LICENSE",
         //"README.md",
