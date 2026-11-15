@@ -49,6 +49,7 @@ pub const cluster_padding: f32 = 14;
 const cluster_title_gap: f32 = 8;
 const label_clearance: f32 = 6;
 const loop_extent: f32 = 24;
+const attachment_gap: f32 = 14;
 const loop_step: f32 = 14;
 pub const margin: f32 = 16;
 
@@ -113,8 +114,14 @@ pub const Node = struct {
     size: Size,
     shape: Shape,
     cluster: u32,
+    /// An optional box, such as a note, kept beside the node on the cross axis: before it
+    /// (left, or above in horizontal layouts) or after it. Zero width means none.
+    attachment: Size = .{ .width = 0, .height = 0 },
+    attachment_before: bool = false,
     /// Output: center in scene coordinates.
     center: Point = .{ .x = 0, .y = 0 },
+    /// Output: center of the attachment box.
+    attachment_center: Point = .{ .x = 0, .y = 0 },
 };
 
 pub const Edge = struct {
@@ -221,6 +228,19 @@ pub const Graph = struct {
             current = graph.clusters[current].parent;
         }
         return false;
+    }
+
+    /// The first or last node inside `cluster`, at any depth, or `none`. Edges that name a
+    /// cluster attach to such a member and are then clipped to the cluster box.
+    pub fn cluster_member(graph: *const Graph, cluster: u32, first: bool) u32 {
+        assert(cluster < graph.cluster_count);
+        var chosen: u32 = none;
+        for (graph.nodes[0..graph.node_count], 0..) |value, index| {
+            if (value.cluster == none or !graph.cluster_within(value.cluster, cluster)) continue;
+            if (chosen == none or !first) chosen = @intCast(index);
+        }
+        assert(chosen == none or chosen < graph.node_count);
+        return chosen;
     }
 
     pub fn edge_points(graph: *const Graph, edge: u32) []const Point {
@@ -617,6 +637,7 @@ const Layout = struct {
             layout.extent_right[index] = cross / 2;
             const along = if (layout.horizontal) node.size.width else node.size.height;
             layout.extent_rank[index] = along;
+            layout.attachment_reserve(@intCast(index));
         }
         layout.loops_reserve();
         var edge: u32 = 0;
@@ -626,6 +647,22 @@ const Layout = struct {
         try layout.clusters_span(allocator);
         layout.ranks = try Csr.build(allocator, layout.rank_count, layout.rank[0..layout.count]);
         try layout.segments_build(allocator);
+    }
+
+    /// An attachment widens its node on one side, so that separation keeps it clear.
+    fn attachment_reserve(layout: *Layout, node: u32) void {
+        const attachment = layout.graph.nodes[node].attachment;
+        assert(attachment.width >= 0);
+        assert(attachment.height >= 0);
+        if (attachment.width == 0) return;
+        const cross = if (layout.horizontal) attachment.height else attachment.width;
+        const along = if (layout.horizontal) attachment.width else attachment.height;
+        if (layout.graph.nodes[node].attachment_before) {
+            layout.extent_left[node] += attachment_gap + cross;
+        } else {
+            layout.extent_right[node] += attachment_gap + cross;
+        }
+        layout.extent_rank[node] = @max(layout.extent_rank[node], along);
     }
 
     /// Self-loops are drawn on the cross-axis end side of their node: reserve that room.
@@ -1381,6 +1418,7 @@ const Layout = struct {
         const graph = layout.graph;
         for (graph.nodes[0..graph.node_count], 0..) |*node, index| {
             node.center = layout.screen(.{ .x = layout.x[index], .y = layout.y[index] });
+            node.attachment_center = layout.screen(layout.attachment_point(@intCast(index)));
         }
         try layout.clusters_output(allocator);
         var loops: [nodes_max]u8 = @splat(0);
@@ -1395,6 +1433,18 @@ const Layout = struct {
             }
         }
         layout.translate();
+    }
+
+    fn attachment_point(layout: *const Layout, node: u32) Point {
+        const value = layout.graph.nodes[node];
+        const cross = if (layout.horizontal) value.size.height else value.size.width;
+        const cross_attachment =
+            if (layout.horizontal) value.attachment.height else value.attachment.width;
+        const distance = cross / 2 + attachment_gap + cross_attachment / 2;
+        const sign: f32 = if (value.attachment_before) -1 else 1;
+        assert(distance >= 0);
+        assert(node < layout.graph.node_count);
+        return .{ .x = layout.x[node] + sign * distance, .y = layout.y[node] };
     }
 
     fn clusters_output(layout: *Layout, allocator: Allocator) Error!void {
@@ -1587,7 +1637,12 @@ const Layout = struct {
     fn translate(layout: *Layout) void {
         const graph = layout.graph;
         var box = Bounds.empty;
-        for (graph.nodes[0..graph.node_count]) |node| box.add_rect(node_rect(node));
+        for (graph.nodes[0..graph.node_count]) |node| {
+            box.add_rect(node_rect(node));
+            if (node.attachment.width > 0) {
+                box.add_rect(rect_centered(node.attachment_center, node.attachment));
+            }
+        }
         for (graph.clusters[0..graph.cluster_count]) |cluster| box.add_rect(cluster.rect);
         for (graph.points[0..graph.point_count]) |point| box.add_point(point);
         for (graph.edges[0..graph.edge_count]) |edge| {
@@ -1597,7 +1652,10 @@ const Layout = struct {
         assert(box.low.x <= box.high.x);
         const dx = margin - box.low.x;
         const dy = margin - box.low.y;
-        for (graph.nodes[0..graph.node_count]) |*node| node.center = shift(node.center, dx, dy);
+        for (graph.nodes[0..graph.node_count]) |*node| {
+            node.center = shift(node.center, dx, dy);
+            node.attachment_center = shift(node.attachment_center, dx, dy);
+        }
         for (graph.points[0..graph.point_count]) |*point| point.* = shift(point.*, dx, dy);
         for (graph.edges[0..graph.edge_count]) |*edge| {
             edge.label_center = shift(edge.label_center, dx, dy);
@@ -2205,6 +2263,43 @@ fn quad(
     };
     assert(points[0].y == points[1].y);
     return 4;
+}
+
+/// Shortens a route whose end attaches to a subgraph, so that it stops at the subgraph box.
+pub fn route_clip_to_cluster(graph: *Graph, edge: u32, cluster: u32, at_end: bool) void {
+    const rect = graph.clusters[cluster].rect;
+    var range = graph.edges[edge].points;
+    const points = graph.points[range.start..][0..range.count];
+    assert(points.len >= 2);
+    var inside: u32 = 0;
+    while (inside + 1 < points.len) : (inside += 1) {
+        const index = if (at_end) points.len - 1 - inside else inside;
+        if (!rect_contains(rect, points[index])) break;
+    }
+    if (inside == 0 or inside + 1 >= points.len) return;
+    const from_index = if (at_end) points.len - inside else inside - 1;
+    const to_index = if (at_end) points.len - 1 - inside else inside;
+    var low = points[to_index];
+    var high = points[from_index];
+    var step: u32 = 0;
+    while (step < 24) : (step += 1) {
+        const middle: Point = .{ .x = (low.x + high.x) / 2, .y = (low.y + high.y) / 2 };
+        if (rect_contains(rect, middle)) high = middle else low = middle;
+    }
+    points[from_index] = low;
+    if (at_end) {
+        range.count = @intCast(from_index + 1);
+    } else {
+        range.start += @intCast(from_index);
+        range.count -= @intCast(from_index);
+    }
+    assert(range.count >= 2);
+    graph.edges[edge].points = range;
+}
+
+pub fn rect_contains(rect: Rect, point: Point) bool {
+    return point.x > rect.x and point.x < rect.x + rect.width and
+        point.y > rect.y and point.y < rect.y + rect.height;
 }
 
 pub const EdgeStyle = struct {

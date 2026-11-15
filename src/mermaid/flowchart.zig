@@ -553,51 +553,10 @@ fn endpoint_resolve(
     if (node_map[node] != none) return node_map[node];
     const subgraph = parser.subgraph_alias(node);
     assert(subgraph != none);
-    var chosen: u32 = none;
-    for (graph.nodes[0..graph.node_count], 0..) |value, index| {
-        if (value.cluster == none or !graph.cluster_within(value.cluster, subgraph)) continue;
-        if (chosen == none or !first) chosen = @intCast(index);
-    }
+    const chosen = graph.cluster_member(subgraph, first);
     if (chosen != none) return chosen;
     const title = graph.clusters[subgraph].title;
     return graph.node_add(.{ .width = @max(title.width, 40), .height = 16 }, .hidden, subgraph);
-}
-
-/// Shortens a route whose end attaches to a subgraph, so that it stops at the subgraph box.
-fn route_clip_to_cluster(graph: *Graph, edge: u32, cluster: u32, at_end: bool) void {
-    const rect = graph.clusters[cluster].rect;
-    var range = graph.edges[edge].points;
-    const points = graph.points[range.start..][0..range.count];
-    assert(points.len >= 2);
-    var inside: u32 = 0;
-    while (inside + 1 < points.len) : (inside += 1) {
-        const index = if (at_end) points.len - 1 - inside else inside;
-        if (!rect_contains(rect, points[index])) break;
-    }
-    if (inside == 0 or inside + 1 >= points.len) return;
-    const from_index = if (at_end) points.len - inside else inside - 1;
-    const to_index = if (at_end) points.len - 1 - inside else inside;
-    var low = points[to_index];
-    var high = points[from_index];
-    var step: u32 = 0;
-    while (step < 24) : (step += 1) {
-        const middle: scene.Point = .{ .x = (low.x + high.x) / 2, .y = (low.y + high.y) / 2 };
-        if (rect_contains(rect, middle)) high = middle else low = middle;
-    }
-    points[from_index] = low;
-    if (at_end) {
-        range.count = @intCast(from_index + 1);
-    } else {
-        range.start += @intCast(from_index);
-        range.count -= @intCast(from_index);
-    }
-    assert(range.count >= 2);
-    graph.edges[edge].points = range;
-}
-
-fn rect_contains(rect: scene.Rect, point: scene.Point) bool {
-    return point.x > rect.x and point.x < rect.x + rect.width and
-        point.y > rect.y and point.y < rect.y + rect.height;
 }
 
 fn aliases_clip(parser: *const Parser, graph: *Graph) void {
@@ -608,10 +567,10 @@ fn aliases_clip(parser: *const Parser, graph: *Graph) void {
         const graph_edge = graph.edges[edge_index];
         if (graph_edge.source == graph_edge.target) continue;
         if (source != none and !node_within(graph, graph_edge.target, source)) {
-            route_clip_to_cluster(graph, edge_index, source, false);
+            graph_module.route_clip_to_cluster(graph, edge_index, source, false);
         }
         if (target != none and !node_within(graph, graph_edge.source, target)) {
-            route_clip_to_cluster(graph, edge_index, target, true);
+            graph_module.route_clip_to_cluster(graph, edge_index, target, true);
         }
     }
 }
