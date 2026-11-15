@@ -515,14 +515,19 @@ pub fn inset_update(document: *Document) void {
 pub fn heading_show(document: *Document, heading_index: usize) void {
     assert(document.open);
     assert(heading_index < document.content.heading_count);
-    const heading = document.content.headings[heading_index];
+    location_show(document, document.content.headings[heading_index].location);
+}
+
+/// Scrolls the line at a string position to the top of the visible area.
+fn location_show(document: *Document, location: usize) void {
+    assert(document.open);
     const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
     const container = objc.send(Id, document.text_view, "textContainer", .{});
     const glyphs = objc.send(
         cocoa.Range,
         layout_manager,
         "glyphRangeForCharacterRange:actualCharacterRange:",
-        .{ cocoa.Range{ .location = heading.location, .length = 1 }, @as(?*cocoa.Range, null) },
+        .{ cocoa.Range{ .location = location, .length = 1 }, @as(?*cocoa.Range, null) },
     );
     const rect = objc.send(
         cocoa.Rect,
@@ -607,9 +612,13 @@ fn outline_select(document: *Document, row: ?u32) void {
     }
 }
 
-/// Scrolls to the heading that a `#fragment` link names. Returns whether one matched.
+/// Scrolls to the heading or footnote that a `#fragment` link names. Returns whether one matched.
 pub fn anchor_show(document: *Document, fragment: []const u8) bool {
     assert(document.open);
+    if (document.content.footnote_location(fragment)) |location| {
+        location_show(document, location);
+        return true;
+    }
     var slug_buffer: [256]u8 = undefined;
     var fragment_buffer: [256]u8 = undefined;
     if (fragment.len > fragment_buffer.len) return false;

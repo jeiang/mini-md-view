@@ -36,8 +36,16 @@ pub fn build(b: *std.Build) void {
     const bundle_exe = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = "MiniMdView.app/Contents/MacOS" } },
     });
+    // build.zig.zon holds the one version number.
+    const plist = std.mem.replaceOwned(
+        u8,
+        b.allocator,
+        @embedFile("assets/Info.plist"),
+        "@VERSION@",
+        @import("build.zig.zon").version,
+    ) catch @panic("OOM");
     const bundle_plist = b.addInstallFile(
-        b.path("assets/Info.plist"),
+        b.addWriteFiles().add("Info.plist", plist),
         "MiniMdView.app/Contents/Info.plist",
     );
     const bundle_icon = b.addInstallFile(
@@ -62,8 +70,12 @@ pub fn build(b: *std.Build) void {
     icon_run.setCwd(b.path("."));
     b.step("icon", "Redraw assets/icon.png and assets/AppIcon.icns").dependOn(&icon_run.step);
 
+    // The app runs from its bundle, so that it has the bundle's icon and document types.
     const run_step = b.step("run", "Run the app");
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addRunFile(.{ .relative = .{
+        .base = .install_prefix,
+        .sub_path = "MiniMdView.app/Contents/MacOS/mini-md-view",
+    } });
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();

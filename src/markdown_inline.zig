@@ -7,12 +7,17 @@
 //!
 //! The text is mutable: entities are decoded in place, which works because an entity is never
 //! shorter than its UTF-8 encoding.
+//!
+//! HTML is interpreted only for a small subset: comments are hidden, `<br>` is a line break,
+//! `<img>` is an image, `<a href>` is a link, and the wrapper tags `p`, `div`, `span`, `center`
+//! and `picture` are dropped. Any other tag is text.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const markdown = @import("markdown.zig");
 const Event = markdown.Event;
 const Definition = markdown.Definition;
+const Footnote = markdown.Footnote;
 
 pub const tokens_max = 1 << 15;
 
@@ -22,6 +27,11 @@ const marks_max = 4;
 const opener_distance_max = 1024;
 const code_span_size_max = 1 << 16;
 const entity_size_max = 32;
+const html_tag_size_max = 2048;
+const footnote_label_size_max = 128;
+
+/// HTML tags that are dropped, while their content stays.
+const html_wrappers = [_][]const u8{ "p", "div", "span", "center", "picture" };
 
 const Mark = enum(u8) { emphasis, strong, strike };
 
@@ -34,10 +44,14 @@ const Kind = enum(u8) {
     /// `[` or `![` that has not found its closing bracket yet.
     link_open,
     image_open,
+    /// `<a href>` that has not found its `</a>` yet.
+    anchor_open,
     link_start,
     link_end,
     image_start,
     image_end,
+    /// `[^label]` with a footnote definition.
+    footnote,
     /// A token that was cancelled, such as an autolink inside a link.
     skip,
 };
@@ -48,6 +62,11 @@ pub const Token = struct {
     start: u32,
     end: u32,
     destination: []const u8 = "",
+    /// Images only: the display size in pixels, or zero when the source does not give it.
+    width: u32 = 0,
+    height: u32 = 0,
+    /// Footnotes only: the index of the footnote.
+    footnote: u32 = 0,
     /// Delimiters only: the delimiter character, and how many are not yet matched.
     marker: u8 = 0,
     count: u8 = 0,
@@ -65,6 +84,9 @@ pub const Input = struct {
     text: []u8,
     tokens: *[tokens_max]Token,
     definitions: []const Definition,
+    /// Footnotes that have a definition. A reference gives a footnote its number.
+    footnotes: []Footnote,
+    footnote_count: *u32,
     /// Free space for the output events.
     events: []Event,
 };
@@ -104,6 +126,7 @@ const Scanner = struct {
     text: []u8,
     tokens: *[tokens_max]Token,
     definitions: []const Definition,
+    footnotes: []const Footnote,
     token_count: u32 = 0,
     position: u32 = 0,
     /// Start of the pending run of plain text.
@@ -155,7 +178,7 @@ const Scanner = struct {
                 '\\' => scanner.scan_escape(),
                 '`' => scanner.scan_code(),
                 '*', '_', '~' => scanner.scan_delimiter(),
-                '[' => scanner.scan_bracket_open(1),
+                '[' => if (!scanner.scan_footnote()) scanner.scan_bracket_open(1),
                 '!' => if (scanner.byte_at(scanner.position + 1) == '[') {
                     scanner.scan_bracket_open(2);
                 } else {
@@ -257,6 +280,21 @@ const Scanner = struct {
             .can_close = can_close,
         });
         scanner.advance_to(scanner.position + length);
+    }
+
+    fn scan_footnote(scanner: *Scanner) bool {
+        const label = footnote_label_match(scanner.rest()) orelse return false;
+        const index = footnote_find(scanner.footnotes, label) orelse return false;
+        scanner.run_flush(scanner.position);
+        const end = scanner.position + @as(u32, @intCast(label.len + "[^]".len));
+        scanner.token_add(.{
+            .kind = .footnote,
+            .start = scanner.position,
+            .end = end,
+            .footnote = index,
+        });
+        scanner.advance_to(end);
+        return true;
     }
 
     fn scan_bracket_open(scanner: *Scanner, length: u32) void {
@@ -390,24 +428,14 @@ const Scanner = struct {
 
     fn scan_angle(scanner: *Scanner) void {
         const rest_bytes = scanner.rest();
-        for ([_][]const u8{ "<br>", "<br/>", "<br />" }) |tag| {
-            const matches = rest_bytes.len >= tag.len and
-                std.ascii.eqlIgnoreCase(rest_bytes[0..tag.len], tag);
-            if (matches) {
-                scanner.run_flush(scanner.position);
-                scanner.token_add(.{
-                    .kind = .hard_break,
-                    .start = scanner.position,
-                    .end = scanner.position,
-                });
-                return scanner.advance_to(scanner.position + @as(u32, @intCast(tag.len)));
-            }
-        }
         if (std.mem.startsWith(u8, rest_bytes, "<!--")) {
             if (std.mem.indexOf(u8, rest_bytes, "-->")) |close| {
                 scanner.run_flush(scanner.position);
                 return scanner.advance_to(scanner.position + @as(u32, @intCast(close + 3)));
             }
+        }
+        if (tag_parse(rest_bytes)) |tag| {
+            if (scanner.scan_tag(&tag)) return;
         }
         const close = std.mem.indexOfAny(u8, rest_bytes, "> \t\n") orelse rest_bytes.len;
         const closed = close < rest_bytes.len and rest_bytes[close] == '>';
@@ -424,6 +452,106 @@ const Scanner = struct {
         const end = scanner.position + @as(u32, @intCast(close));
         scanner.link_add(scanner.position, start, end);
         scanner.advance_to(end + 1);
+    }
+
+    /// Handles a tag of the HTML subset. Returns false for any other tag, which stays text.
+    fn scan_tag(scanner: *Scanner, tag: *const Tag) bool {
+        const start = scanner.position;
+        const end = start + tag.size;
+        assert(end <= scanner.text.len);
+        if (std.ascii.eqlIgnoreCase(tag.name, "br")) {
+            if (tag.closing or tag.attribute_count > 0) return false;
+            scanner.run_flush(start);
+            scanner.token_add(.{ .kind = .hard_break, .start = start, .end = start });
+        } else if (std.ascii.eqlIgnoreCase(tag.name, "img")) {
+            if (tag.closing) return false;
+            const source = tag.source orelse return false;
+            if (source.len == 0) return false;
+            scanner.run_flush(start);
+            scanner.token_add(.{
+                .kind = .image_start,
+                .start = start,
+                .end = start,
+                .destination = source,
+                .width = tag.width,
+                .height = tag.height,
+            });
+            if (tag.alternative.len > 0) {
+                const offset: u32 = @intCast(
+                    @intFromPtr(tag.alternative.ptr) - @intFromPtr(scanner.text.ptr),
+                );
+                const alternative_end = offset + @as(u32, @intCast(tag.alternative.len));
+                scanner.token_add(.{ .kind = .text, .start = offset, .end = alternative_end });
+            }
+            scanner.token_add(.{ .kind = .image_end, .start = end, .end = end });
+        } else if (std.ascii.eqlIgnoreCase(tag.name, "a")) {
+            if (tag.closing) return scanner.anchor_close(end);
+            const href = tag.href orelse return false;
+            scanner.run_flush(start);
+            scanner.token_add(.{
+                .kind = .anchor_open,
+                .start = start,
+                .end = end,
+                .destination = href,
+            });
+        } else {
+            for (html_wrappers) |name| {
+                if (std.ascii.eqlIgnoreCase(tag.name, name)) break;
+            } else return false;
+            return scanner.wrapper_drop(end);
+        }
+        scanner.advance_to(end);
+        return true;
+    }
+
+    /// Drops a wrapper tag. A tag on a line of its own takes one line break with it, so that
+    /// it leaves no space behind.
+    fn wrapper_drop(scanner: *Scanner, end: u32) bool {
+        const start = scanner.position;
+        const previous: ?*Token = if (scanner.token_count > 0)
+            &scanner.tokens[scanner.token_count - 1]
+        else
+            null;
+        const break_before = previous != null and previous.?.kind == .soft_break;
+        const line_start = scanner.run_start == start and (start == 0 or break_before);
+        scanner.run_flush(start);
+        if (line_start and scanner.byte_at(end) == '\n') {
+            var next = end + 1;
+            while (scanner.byte_at(next) == ' ' or scanner.byte_at(next) == '\t') next += 1;
+            scanner.advance_to(next);
+            return true;
+        }
+        if (line_start and end == scanner.text.len and break_before) previous.?.kind = .skip;
+        scanner.advance_to(end);
+        return true;
+    }
+
+    /// Pairs `</a>` with the nearest open `<a href>`, as a closing bracket pairs with its opener.
+    fn anchor_close(scanner: *Scanner, end: u32) bool {
+        const opener_index = scanner.anchor_opener_find() orelse return false;
+        scanner.run_flush(scanner.position);
+        const inner = scanner.tokens[opener_index + 1 .. scanner.token_count];
+        emphasis_process(inner);
+        for (inner) |*token| {
+            token.active = false;
+            if (token.kind == .link_start or token.kind == .link_end) token.kind = .skip;
+        }
+        scanner.tokens[opener_index].kind = .link_start;
+        const position = scanner.position;
+        scanner.token_add(.{ .kind = .link_end, .start = position, .end = position });
+        scanner.advance_to(end);
+        return true;
+    }
+
+    fn anchor_opener_find(scanner: *const Scanner) ?u32 {
+        const index_min = scanner.token_count -| opener_distance_max;
+        var index = scanner.token_count;
+        while (index > index_min) {
+            index -= 1;
+            const token = &scanner.tokens[index];
+            if (token.kind == .anchor_open and token.active) return index;
+        }
+        return null;
     }
 
     /// Adds a link whose text is its own destination.
@@ -542,6 +670,96 @@ fn entity_decode(name: []const u8, buffer: *[4]u8) ?[]const u8 {
     return buffer[0..length];
 }
 
+const Tag = struct {
+    name: []const u8,
+    closing: bool,
+    /// Bytes from `<` to `>`.
+    size: u32 = 0,
+    attribute_count: u32 = 0,
+    source: ?[]const u8 = null,
+    alternative: []const u8 = "",
+    href: ?[]const u8 = null,
+    width: u32 = 0,
+    height: u32 = 0,
+};
+
+/// Parses a well-formed HTML tag at the start of the bytes. Attribute values are not decoded,
+/// as link destinations are not.
+fn tag_parse(bytes: []const u8) ?Tag {
+    const window = bytes[0..@min(bytes.len, html_tag_size_max)];
+    if (window.len < 3 or window[0] != '<') return null;
+    var cursor: u32 = 1;
+    const closing = window[cursor] == '/';
+    cursor += @intFromBool(closing);
+    const name_start = cursor;
+    if (!std.ascii.isAlphabetic(window[name_start])) return null;
+    while (cursor < window.len and std.ascii.isAlphanumeric(window[cursor])) cursor += 1;
+    var tag: Tag = .{ .name = window[name_start..cursor], .closing = closing };
+    while (cursor < window.len) {
+        const space_start = cursor;
+        cursor = whitespace_skip(window, cursor);
+        if (cursor == window.len) return null;
+        if (window[cursor] == '>') {
+            tag.size = cursor + 1;
+            return tag;
+        }
+        if (window[cursor] == '/' and !closing) {
+            if (cursor + 1 == window.len or window[cursor + 1] != '>') return null;
+            tag.size = cursor + 2;
+            return tag;
+        }
+        // An attribute follows white space, and a closing tag has none.
+        if (closing or cursor == space_start) return null;
+        const attribute_start = cursor;
+        const first = window[cursor];
+        if (!std.ascii.isAlphabetic(first) and first != '_' and first != ':') return null;
+        while (cursor < window.len) : (cursor += 1) {
+            const byte = window[cursor];
+            const name_byte = std.ascii.isAlphanumeric(byte) or
+                std.mem.indexOfScalar(u8, "_.:-", byte) != null;
+            if (!name_byte) break;
+        }
+        const name = window[attribute_start..cursor];
+        var value: []const u8 = "";
+        const equals = whitespace_skip(window, cursor);
+        if (equals < window.len and window[equals] == '=') {
+            cursor = whitespace_skip(window, equals + 1);
+            if (cursor == window.len) return null;
+            const quote = window[cursor];
+            if (quote == '"' or quote == '\'') {
+                const close = std.mem.indexOfScalarPos(u8, window, cursor + 1, quote) orelse {
+                    return null;
+                };
+                value = window[cursor + 1 .. close];
+                cursor = @intCast(close + 1);
+            } else {
+                const value_start = cursor;
+                while (cursor < window.len) : (cursor += 1) {
+                    if (std.mem.indexOfScalar(u8, " \t\n\r\"'=<>`", window[cursor]) != null) break;
+                }
+                if (cursor == value_start) return null;
+                value = window[value_start..cursor];
+            }
+        }
+        tag.attribute_count += 1;
+        if (std.ascii.eqlIgnoreCase(name, "src")) tag.source = value;
+        if (std.ascii.eqlIgnoreCase(name, "alt")) tag.alternative = value;
+        if (std.ascii.eqlIgnoreCase(name, "href")) tag.href = value;
+        if (std.ascii.eqlIgnoreCase(name, "width")) tag.width = pixels_parse(value);
+        if (std.ascii.eqlIgnoreCase(name, "height")) tag.height = pixels_parse(value);
+    }
+    return null;
+}
+
+/// A size in pixels from an attribute value of digits only. Zero for other units or no value.
+fn pixels_parse(value: []const u8) u32 {
+    if (value.len == 0 or value.len > 5) return 0;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) return 0;
+    }
+    return std.fmt.parseInt(u32, value, 10) catch unreachable;
+}
+
 /// Matches closing delimiters with openers, as CommonMark's "process emphasis" does. Each match
 /// is recorded on both runs. Runs inside a matched pair are deactivated, which keeps the
 /// resulting spans well nested.
@@ -604,6 +822,8 @@ fn emphasis_opener_find(tokens: []Token, closer_index: usize) ?usize {
 const Emitter = struct {
     text: []const u8,
     events: []Event,
+    footnotes: []Footnote,
+    footnote_count: *u32,
     event_count: u32 = 0,
     word_count: u32 = 0,
 
@@ -623,14 +843,26 @@ const Emitter = struct {
     fn token_emit(emitter: *Emitter, token: *const Token) void {
         const bytes = emitter.text[token.start..token.end];
         switch (token.kind) {
-            .text, .link_open, .image_open => emitter.text_add(bytes),
+            .text, .link_open, .image_open, .anchor_open => emitter.text_add(bytes),
             .code => emitter.add(.{ .code = bytes }),
             .soft_break => emitter.add(.soft_break),
             .hard_break => emitter.add(.hard_break),
             .link_start => emitter.add(.{ .link_start = token.destination }),
             .link_end => emitter.add(.link_end),
-            .image_start => emitter.add(.{ .image_start = token.destination }),
+            .image_start => emitter.add(.{ .image_start = .{
+                .source = token.destination,
+                .width = token.width,
+                .height = token.height,
+            } }),
             .image_end => emitter.add(.image_end),
+            .footnote => {
+                const footnote = &emitter.footnotes[token.footnote];
+                if (footnote.number == 0) {
+                    emitter.footnote_count.* += 1;
+                    footnote.number = emitter.footnote_count.*;
+                }
+                emitter.add(.{ .footnote_reference = footnote.number });
+            },
             .skip => {},
             .delimiter => {
                 for (token.closes[0..token.close_count]) |mark| emitter.add(switch (mark) {
@@ -669,6 +901,7 @@ pub fn parse(input: Input) Output {
         .text = input.text,
         .tokens = input.tokens,
         .definitions = input.definitions,
+        .footnotes = input.footnotes,
     };
     scanner.scan();
     const tokens = scanner.tokens[0..scanner.token_count];
@@ -676,7 +909,12 @@ pub fn parse(input: Input) Output {
 
     var events_needed: u32 = 0;
     for (tokens) |*token| events_needed += token_event_count(token);
-    var emitter: Emitter = .{ .text = input.text, .events = input.events };
+    var emitter: Emitter = .{
+        .text = input.text,
+        .events = input.events,
+        .footnotes = input.footnotes,
+        .footnote_count = input.footnote_count,
+    };
     if (scanner.overflow or events_needed > input.events.len) {
         // The block is too complex: show it as plain text instead of dropping it.
         if (input.events.len > 0) emitter.text_add(input.text);
@@ -693,4 +931,23 @@ pub fn parse(input: Input) Output {
         .word_count = emitter.word_count,
         .truncated = false,
     };
+}
+
+/// Matches `[^label]` at the start of the bytes, and returns the label.
+pub fn footnote_label_match(bytes: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, bytes, "[^")) return null;
+    const window = bytes[2..@min(bytes.len, 2 + footnote_label_size_max + 1)];
+    for (window, 0..) |byte, index| {
+        if (byte == ']') return if (index == 0) null else window[0..index];
+        if (byte == '[' or std.ascii.isWhitespace(byte)) return null;
+    }
+    return null;
+}
+
+/// Returns the index of the footnote with the label, ignoring case.
+pub fn footnote_find(footnotes: []const Footnote, label: []const u8) ?u32 {
+    for (footnotes, 0..) |footnote, index| {
+        if (std.ascii.eqlIgnoreCase(footnote.label, label)) return @intCast(index);
+    }
+    return null;
 }
