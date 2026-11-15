@@ -96,6 +96,7 @@ fn controller_class() Id {
         },
         .{ .name = toolbar_item, .types = "@@:@@B", .implementation = &toolbar_item_create },
         .{ .name = frame_changed, .types = "v@:@", .implementation = &view_frame_changed },
+        .{ .name = "viewBoundsChanged:", .types = "v@:@", .implementation = &view_bounds_changed },
     }, false);
 }
 
@@ -246,6 +247,12 @@ fn view_frame_changed(_: Id, _: Selector, notification: Id) callconv(.c) void {
     if (document.find(.scroll_view, view)) |resized| document.inset_update(resized);
 }
 
+fn view_bounds_changed(_: Id, _: Selector, notification: Id) callconv(.c) void {
+    const clip_view = objc.send(?Id, notification, "object", .{}) orelse return;
+    const scroll_view = objc.send(?Id, clip_view, "superview", .{});
+    if (document.find(.scroll_view, scroll_view)) |scrolled| document.outline_follow(scrolled);
+}
+
 fn outline_row_count(_: Id, _: Selector, table: ?Id) callconv(.c) isize {
     const shown = document.find(.outline_view, table) orelse return 0;
     return shown.content.heading_count;
@@ -300,9 +307,10 @@ fn constraint_activate(
 fn outline_selection_changed(_: Id, _: Selector, notification: Id) callconv(.c) void {
     const table = objc.send(?Id, notification, "object", .{});
     const shown = document.find(.outline_view, table) orelse return;
+    if (shown.outline_selecting) return;
     const row = objc.send(isize, table.?, "selectedRow", .{});
     if (row < 0 or row >= shown.content.heading_count) return;
-    document.heading_show(shown, @intCast(row));
+    document.heading_click(shown, @intCast(row));
 }
 
 /// Schemes that a click may hand to another application. A document is untrusted input, so a

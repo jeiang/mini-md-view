@@ -28,7 +28,8 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
 - Shows up to 8 documents, each in its own window.
 - Reloads a document when its file changes on disk, and keeps the scroll position. When the new
   file cannot be shown, the old content stays and the window subtitle says why.
-- Lists the headings in a sidebar. Select one to go to it.
+- Lists the headings in a sidebar. Select one to go to it. As you scroll, the sidebar selects the
+  heading of the section at the top of the window.
 - Follows the system appearance and accent color.
 - Find, copy, print and zoom work on the whole document, diagrams included. The zoom applies to
   every window, and the viewer remembers it.

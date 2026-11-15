@@ -37,6 +37,7 @@ pub extern const NSToolTipAttributeName: Id;
 pub extern const NSCursorAttributeName: Id;
 
 pub extern const NSViewFrameDidChangeNotification: Id;
+pub extern const NSViewBoundsDidChangeNotification: Id;
 pub extern const NSToolbarToggleSidebarItemIdentifier: Id;
 pub extern const NSToolbarSidebarTrackingSeparatorItemIdentifier: Id;
 pub extern const NSToolbarFlexibleSpaceItemIdentifier: Id;

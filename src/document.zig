@@ -22,6 +22,8 @@ const zoom_min = 0.6;
 const zoom_max = 3.0;
 const zoom_step = 1.1;
 const inset_min = 28;
+/// Space between the top of the visible area and a heading that the outline scrolled to.
+const heading_margin = 16;
 
 pub const Document = struct {
     open: bool,
@@ -45,6 +47,12 @@ pub const Document = struct {
     stream: ?cocoa.EventStream,
     /// The subtitle says that the last reload failed, in place of the word count.
     notice: bool,
+    /// The outline row that a click selected. It stays selected while the scroll position that
+    /// the click gave stays, even when the heading cannot reach the top of the visible area.
+    heading_clicked: ?u32,
+    heading_clicked_scroll: f64,
+    /// The outline selection changes because of scrolling, not because of the user.
+    outline_selecting: bool,
     content: render.Content,
 
     pub fn path(document: *const Document) []const u8 {
@@ -127,6 +135,8 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     document.content.reset();
     document.stream = null;
     document.notice = false;
+    document.outline_selecting = false;
+    document.heading_clicked = null;
     window_create(document, controller);
     document.open = true;
     document.modified = file_read(document, cocoa.string(file_path)) catch |err| {
@@ -152,6 +162,11 @@ pub fn close(document: *Document) void {
             observer,
             cocoa.NSViewFrameDidChangeNotification,
             document.scroll_view,
+        });
+        objc.send(void, center, "removeObserver:name:object:", .{
+            observer,
+            cocoa.NSViewBoundsDidChangeNotification,
+            objc.send(Id, document.scroll_view, "contentView", .{}),
         });
     }
     objc.send(void, document.window, "setDelegate:", .{@as(?Id, null)});
@@ -340,6 +355,8 @@ fn show(document: *Document, scroll: ?f64) void {
     objc.send(void, document.outline_view, "reloadData", .{});
     title_update(document);
     if (scroll) |y| scroll_set(document, y);
+    document.heading_clicked = null;
+    outline_follow(document);
 }
 
 fn scroll_get(document: *const Document) f64 {
@@ -410,9 +427,79 @@ pub fn heading_show(document: *Document, heading_index: usize) void {
     );
     const origin = objc.send(cocoa.Point, document.text_view, "textContainerOrigin", .{});
     const insets = objc.send(cocoa.EdgeInsets, document.scroll_view, "contentInsets", .{});
-    const margin = 16;
-    const target: cocoa.Point = .{ .x = 0, .y = rect.origin.y + origin.y - insets.top - margin };
+    const target: cocoa.Point = .{
+        .x = 0,
+        .y = rect.origin.y + origin.y - insets.top - heading_margin,
+    };
     objc.send(void, document.text_view, "scrollPoint:", .{target});
+}
+
+/// Scrolls to the heading of the outline row that the user selected, and keeps the row selected.
+pub fn heading_click(document: *Document, row: u32) void {
+    assert(document.open);
+    assert(row < document.content.heading_count);
+    heading_show(document, row);
+    document.heading_clicked = row;
+    document.heading_clicked_scroll = scroll_get(document);
+    outline_select(document, row);
+}
+
+/// Selects the outline row of the heading that the top of the visible text belongs to. The
+/// work per call is small, because it runs for every scroll event.
+pub fn outline_follow(document: *Document) void {
+    assert(document.open);
+    if (document.heading_clicked) |row| {
+        if (scroll_get(document) == document.heading_clicked_scroll) {
+            return outline_select(document, row);
+        }
+        document.heading_clicked = null;
+    }
+    outline_select(document, heading_top(document));
+}
+
+/// The last heading at or above the top of the visible text, or null when there is none.
+fn heading_top(document: *Document) ?u32 {
+    const headings = document.content.headings_slice();
+    if (headings.len == 0) return null;
+    const layout_manager = objc.send(Id, document.text_view, "layoutManager", .{});
+    const container = objc.send(Id, document.text_view, "textContainer", .{});
+    const origin = objc.send(cocoa.Point, document.text_view, "textContainerOrigin", .{});
+    const insets = objc.send(cocoa.EdgeInsets, document.scroll_view, "contentInsets", .{});
+    // One point below where `heading_show` puts a heading, so that the heading counts.
+    const top = scroll_get(document) + insets.top + heading_margin + 1 - origin.y;
+    const glyph = objc.send(
+        usize,
+        layout_manager,
+        "glyphIndexForPoint:inTextContainer:fractionOfDistanceThroughGlyph:",
+        .{ cocoa.Point{ .x = 0, .y = @max(0, top) }, container, @as(?*f64, null) },
+    );
+    const location = objc.send(usize, layout_manager, "characterIndexForGlyphAtIndex:", .{glyph});
+    const count = std.sort.partitionPoint(render.Heading, headings, location, heading_before);
+    if (count == 0) return null;
+    return @intCast(count - 1);
+}
+
+fn heading_before(location: usize, heading: render.Heading) bool {
+    return heading.location <= location;
+}
+
+fn outline_select(document: *Document, row: ?u32) void {
+    const table = document.outline_view;
+    const wanted: isize = if (row) |index| index else -1;
+    if (objc.send(isize, table, "selectedRow", .{}) == wanted) return;
+    // While a render is in progress, the table still shows the old headings.
+    if (wanted >= objc.send(isize, table, "numberOfRows", .{})) return;
+    document.outline_selecting = true;
+    defer document.outline_selecting = false;
+    if (row) |index| {
+        const rows = objc.send(Id, objc.class("NSIndexSet"), "indexSetWithIndex:", .{
+            @as(usize, index),
+        });
+        objc.send(void, table, "selectRowIndexes:byExtendingSelection:", .{ rows, false });
+        objc.send(void, table, "scrollRowToVisible:", .{wanted});
+    } else {
+        objc.send(void, table, "deselectAll:", .{@as(?Id, null)});
+    }
 }
 
 /// Scrolls to the heading that a `#fragment` link names. Returns whether one matched.
@@ -518,6 +605,14 @@ fn window_create(document: *Document, controller: Id) void {
         objc.selector("viewFrameChanged:"),
         cocoa.NSViewFrameDidChangeNotification,
         document.scroll_view,
+    });
+    const clip_view = objc.send(Id, document.scroll_view, "contentView", .{});
+    objc.send(void, clip_view, "setPostsBoundsChangedNotifications:", .{true});
+    objc.send(void, center, "addObserver:selector:name:object:", .{
+        controller,
+        objc.selector("viewBoundsChanged:"),
+        cocoa.NSViewBoundsDidChangeNotification,
+        clip_view,
     });
 }
 
