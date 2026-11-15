@@ -140,10 +140,13 @@ fn civil_from_days(days: i64) Civil {
 }
 
 fn is_leap_year(year: i64) bool {
+    assert(year >= year_min - 1);
+    assert(year <= year_max + 1);
     return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
 }
 
 fn days_in_month(year: i64, month: u32) u32 {
+    assert(year <= year_max + 1);
     assert(month >= 1 and month <= 12);
     const lengths = [12]u32{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     if (month == 2 and is_leap_year(year)) return 29;
@@ -168,6 +171,7 @@ fn months_add(time: i64, months: i64) scene.Error!i64 {
 
 /// Parses `YYYY-MM-DD` into seconds.
 fn date_parse(text: []const u8) ?i64 {
+    assert(text.len <= source_length_max);
     if (text.len != 10) return null;
     if (text[4] != '-' or text[7] != '-') return null;
     const year = std.fmt.parseInt(u32, text[0..4], 10) catch return null;
@@ -186,6 +190,7 @@ fn date_parse(text: []const u8) ?i64 {
 
 /// Parses durations such as `3d`, `2w`, `12h`, `1.5d`, `30m`, `1M`, or `1y`.
 fn duration_parse(text: []const u8) ?Duration {
+    assert(text.len <= source_length_max);
     if (text.len < 2) return null;
     const unit_length: usize = if (std.mem.endsWith(u8, text, "ms")) 2 else 1;
     const unit = text[text.len - unit_length ..];
@@ -256,6 +261,7 @@ const Lines = struct {
 
 /// Returns the rest of `line` when it starts with `word` followed by whitespace or the end.
 fn word_strip(line: []const u8, word: []const u8) ?[]const u8 {
+    assert(line.len <= source_length_max);
     assert(word.len > 0);
     if (!std.mem.startsWith(u8, line, word)) return null;
     const rest = line[word.len..];
@@ -341,6 +347,7 @@ fn parse_task(line: []const u8, gantt: *Gantt) scene.Error!void {
 }
 
 fn start_parse(text: []const u8) scene.Error!Start {
+    assert(text.len <= source_length_max);
     if (word_strip(text, "after")) |ids| {
         if (ids.len == 0) return error.Syntax;
         return .{ .after = ids };
@@ -351,6 +358,7 @@ fn start_parse(text: []const u8) scene.Error!Start {
 }
 
 fn end_parse(text: []const u8, inclusive: bool) scene.Error!End {
+    assert(text.len <= source_length_max);
     if (word_strip(text, "until")) |ids| {
         if (ids.len == 0) return error.Syntax;
         return .{ .until = ids };
@@ -392,6 +400,7 @@ fn resolve(gantt: *Gantt) scene.Error!void {
 
 /// Returns whether the task could be resolved, which needs every task it refers to resolved.
 fn task_resolve(gantt: *Gantt, index: u32) scene.Error!bool {
+    assert(index < gantt.task_count);
     const task = &gantt.tasks[index];
     assert(!task.resolved);
     const start: i64 = switch (task.start_spec) {
@@ -439,6 +448,7 @@ fn ids_time(
 }
 
 fn task_find(gantt: *const Gantt, id: []const u8) ?*const Task {
+    assert(gantt.task_count <= tasks_max);
     assert(id.len > 0);
     for (gantt.tasks[0..gantt.task_count]) |*task| {
         if (std.mem.eql(u8, task.id, id)) return task;
@@ -657,6 +667,7 @@ const tick_steps = [_]TickStep{
 };
 
 fn tick_step_seconds(step: TickStep) i64 {
+    assert(step.count <= 1000);
     assert(step.count > 0);
     const unit: i64 = switch (step.unit) {
         .hour => seconds_per_hour,
@@ -669,6 +680,7 @@ fn tick_step_seconds(step: TickStep) i64 {
 
 /// Picks the finest step whose labels do not crowd each other.
 fn tick_step_choose(span: i64, measurer: scene.Measurer) TickStep {
+    assert(tick_steps.len > 0);
     assert(span > 0);
     for (tick_steps) |step| {
         const label_width = measurer.measure(tick_sample(step.unit), .small).width;
@@ -697,6 +709,7 @@ fn div_ceil(numerator: i64, denominator: i64) i64 {
 
 /// Returns the first tick at or after `time` that lies on the step's grid.
 fn tick_first(time: i64, step: TickStep) scene.Error!i64 {
+    assert(time >= -719162 * @as(i64, seconds_per_day));
     assert(step.count > 0);
     switch (step.unit) {
         .hour, .day => {
@@ -735,6 +748,7 @@ fn tick_next(time: i64, step: TickStep) scene.Error!i64 {
 }
 
 fn tick_label(out: *scene.Scene, time: i64, unit: TickUnit) scene.Error![]const u8 {
+    assert(out.text_count <= out.text.len);
     const civil = civil_from_days(@divFloor(time, seconds_per_day));
     assert(civil.year >= 0);
     const year: u32 = @intCast(civil.year);
@@ -751,6 +765,7 @@ fn tick_label(out: *scene.Scene, time: i64, unit: TickUnit) scene.Error![]const 
 }
 
 fn axis_emit(gantt: *const Gantt, geometry: Geometry, canvas: *Canvas) scene.Error!void {
+    assert(geometry.rows_bottom > geometry.rows_top);
     assert(gantt.time_max > gantt.time_min);
     const axis_y = geometry.rows_bottom;
     const step = tick_step_choose(gantt.time_max - gantt.time_min, canvas.measurer);
@@ -780,6 +795,7 @@ fn axis_emit(gantt: *const Gantt, geometry: Geometry, canvas: *Canvas) scene.Err
 const BarStyle = struct { fill: scene.Color, stroke: scene.Color };
 
 fn bar_style(task: Task) BarStyle {
+    assert(task.end >= task.start);
     assert(task.resolved);
     if (task.crit) {
         return .{ .fill = if (task.done) .group_stroke else .series_4, .stroke = .series_4 };
@@ -834,6 +850,7 @@ fn task_label_emit(
     bar_end_x: f32,
     canvas: *Canvas,
 ) scene.Error!void {
+    assert(task.name.len > 0);
     assert(bar_end_x > bar_start.x);
     const width = canvas.measurer.measure(task.name, .regular).width;
     const fits_inside = !task.milestone and width + 2 * label_inset <= bar_end_x - bar_start.x;
@@ -1066,6 +1083,14 @@ test "gantt: truncated prefixes never crash" {
     var fixture: Fixture = .{};
     for (0..sample.len + 1) |length| {
         fixture.run(sample[0..length]) catch continue;
+        try expect_inside(&fixture.out);
+    }
+    // Deleting any single byte must not crash either.
+    var mutated: [sample.len]u8 = undefined;
+    for (0..sample.len) |index| {
+        @memcpy(mutated[0..index], sample[0..index]);
+        @memcpy(mutated[index .. sample.len - 1], sample[index + 1 ..]);
+        fixture.run(mutated[0 .. sample.len - 1]) catch continue;
         try expect_inside(&fixture.out);
     }
 }

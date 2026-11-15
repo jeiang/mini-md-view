@@ -99,6 +99,7 @@ const Lines = struct {
 
 /// Returns the rest of `line` when it starts with `word` followed by whitespace or the end.
 fn word_strip(line: []const u8, word: []const u8) ?[]const u8 {
+    assert(line.len <= source_length_max);
     assert(word.len > 0);
     if (!std.mem.startsWith(u8, line, word)) return null;
     const rest = line[word.len..];
@@ -445,6 +446,14 @@ test "pie: truncated prefixes never crash" {
     var fixture: Fixture = .{};
     for (0..sample.len + 1) |length| {
         fixture.run(sample[0..length]) catch continue;
+        try expect_inside(&fixture.out);
+    }
+    // Deleting any single byte must not crash either.
+    var mutated: [sample.len]u8 = undefined;
+    for (0..sample.len) |index| {
+        @memcpy(mutated[0..index], sample[0..index]);
+        @memcpy(mutated[index .. sample.len - 1], sample[index + 1 ..]);
+        fixture.run(mutated[0 .. sample.len - 1]) catch continue;
         try expect_inside(&fixture.out);
     }
 }
