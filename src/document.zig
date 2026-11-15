@@ -43,6 +43,8 @@ pub const Document = struct {
     source_length: u32,
     /// Watches the directory of the file. Null when no stream could be started.
     stream: ?cocoa.EventStream,
+    /// The subtitle says that the last reload failed, in place of the word count.
+    notice: bool,
     content: render.Content,
 
     pub fn path(document: *const Document) []const u8 {
@@ -124,6 +126,7 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     document.path_length = @intCast(file_path.len);
     document.content.reset();
     document.stream = null;
+    document.notice = false;
     window_create(document, controller);
     document.open = true;
     document.modified = file_read(document, cocoa.string(file_path)) catch |err| {
@@ -177,13 +180,29 @@ fn file_modified(file_path: Id) ?f64 {
     return objc.send(f64, date, "timeIntervalSinceReferenceDate", .{});
 }
 
-/// Reloads the document when its file changed on disk. A file that cannot be read right now,
-/// for example in the middle of an editor's save, leaves the current view in place.
+/// Reloads the document when its file changed on disk. When the new file cannot be shown, the
+/// old content stays and the subtitle gives the reason. A notice is checked again on every
+/// change in the directory, so that it goes away once an editor's save completes.
 fn refresh(document: *Document) void {
     assert(document.open);
-    const modified = file_modified(cocoa.string(document.path())) orelse return;
-    if (modified == document.modified) return;
-    reload(document) catch {};
+    const modified = file_modified(cocoa.string(document.path()));
+    if (modified == document.modified and !document.notice) return;
+    reload(document) catch |err| notice_show(document, err);
+}
+
+fn notice_show(document: *Document, err: LoadError) void {
+    assert(document.open);
+    const reason = switch (err) {
+        error.Unreadable => "the file does not exist or cannot be read",
+        error.TooLarge => "the file is larger than 4 MB",
+        error.NotText => "the file is not UTF-8 text",
+    };
+    var buffer: [128]u8 = undefined;
+    const subtitle = std.fmt.bufPrint(&buffer, "Not reloaded: {s}", .{reason}) catch {
+        unreachable;
+    };
+    objc.send(void, document.window, "setSubtitle:", .{cocoa.string(subtitle)});
+    document.notice = true;
 }
 
 /// Watches the directory of the file rather than the file itself: editors often save by
@@ -353,6 +372,7 @@ fn title_update(document: *Document) void {
         unreachable;
     };
     objc.send(void, window, "setSubtitle:", .{cocoa.string(subtitle)});
+    document.notice = false;
 }
 
 /// Centers the text column in the pane. The pane can be wider than a readable line.
