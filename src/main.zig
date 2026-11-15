@@ -41,7 +41,11 @@ fn controller_class() Id {
     const frame_changed = "viewFrameChanged:";
     const toolbar_item = "toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:";
     return objc.class_define("MiniedController", "NSObject", &.{
-        .{ .name = "applicationDidFinishLaunching:", .types = "v@:@", .implementation = &did_finish_launching },
+        .{
+            .name = "applicationDidFinishLaunching:",
+            .types = "v@:@",
+            .implementation = &did_finish_launching,
+        },
         .{ .name = "application:openFiles:", .types = "v@:@@", .implementation = &open_files },
         .{
             .name = "applicationShouldHandleReopen:hasVisibleWindows:",
@@ -61,14 +65,26 @@ fn controller_class() Id {
         .{ .name = "validateMenuItem:", .types = "B@:@", .implementation = &validate_item },
         .{ .name = "validateToolbarItem:", .types = "B@:@", .implementation = &validate_item },
         .{ .name = "windowWillClose:", .types = "v@:@", .implementation = &window_will_close },
-        .{ .name = "numberOfRowsInTableView:", .types = "q@:@", .implementation = &outline_row_count },
-        .{ .name = "tableView:viewForTableColumn:row:", .types = "@@:@@q", .implementation = &outline_row_view },
+        .{
+            .name = "numberOfRowsInTableView:",
+            .types = "q@:@",
+            .implementation = &outline_row_count,
+        },
+        .{
+            .name = "tableView:viewForTableColumn:row:",
+            .types = "@@:@@q",
+            .implementation = &outline_row_view,
+        },
         .{
             .name = "tableViewSelectionDidChange:",
             .types = "v@:@",
             .implementation = &outline_selection_changed,
         },
-        .{ .name = "textView:clickedOnLink:atIndex:", .types = "B@:@@Q", .implementation = &link_clicked },
+        .{
+            .name = "textView:clickedOnLink:atIndex:",
+            .types = "B@:@@Q",
+            .implementation = &link_clicked,
+        },
         .{
             .name = "toolbarDefaultItemIdentifiers:",
             .types = "@@:@",
@@ -92,7 +108,13 @@ fn did_finish_launching(_: Id, _: Selector, _: ?Id) callconv(.c) void {
         Id,
         objc.class("NSTimer"),
         "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:",
-        .{ @as(f64, refresh_interval_seconds), controller, objc.selector("timerFired:"), @as(?Id, null), true },
+        .{
+            @as(f64, refresh_interval_seconds),
+            controller,
+            objc.selector("timerFired:"),
+            @as(?Id, null),
+            true,
+        },
     );
     arguments_open();
     objc.send(void, app(), "activateIgnoringOtherApps:", .{true});
@@ -204,7 +226,10 @@ fn action_open(_: Id, _: Selector, _: ?Id) callconv(.c) void {
 fn action_reload(_: Id, _: Selector, _: ?Id) callconv(.c) void {
     const current = document.current() orelse return;
     document.reload(current) catch {
-        alert_show("The document could not be reloaded.", "The file is missing or is no longer text.");
+        alert_show(
+            "The document could not be reloaded.",
+            "The file is missing or is no longer text.",
+        );
     };
 }
 
@@ -250,7 +275,12 @@ fn outline_row_view(_: Id, _: Selector, table: ?Id, _: ?Id, row: isize) callconv
     const heading = shown.content.headings[@intCast(row)];
     assert(heading.level >= shown.heading_level_min);
 
-    const label = objc.send(Id, objc.class("NSTextField"), "labelWithString:", .{cocoa.string(heading.title)});
+    const label = objc.send(
+        Id,
+        objc.class("NSTextField"),
+        "labelWithString:",
+        .{cocoa.string(heading.title)},
+    );
     const line_break_truncate_tail: usize = 4;
     objc.send(void, label, "setLineBreakMode:", .{line_break_truncate_tail});
     objc.send(void, label, "setTranslatesAutoresizingMaskIntoConstraints:", .{false});
@@ -309,13 +339,22 @@ fn link_clicked(_: Id, _: Selector, text_view: ?Id, link: Id, _: usize) callconv
     const scheme_end = std.mem.indexOfScalar(u8, destination, ':');
     const path_end = std.mem.indexOfAny(u8, destination, "/?#") orelse destination.len;
     if (scheme_end != null and scheme_end.? < path_end) {
-        const url = objc.send(?Id, objc.class("NSURL"), "URLWithString:", .{link}) orelse return true;
+        const url = objc.send(?Id, objc.class("NSURL"), "URLWithString:", .{link}) orelse {
+            return true;
+        };
         _ = objc.send(bool, workspace, "openURL:", .{url});
         return true;
     }
     if (std.mem.indexOfScalar(u8, destination, '@') != null and path_end == destination.len) {
-        const address = objc.send(Id, cocoa.string("mailto:"), "stringByAppendingString:", .{link});
-        const url = objc.send(?Id, objc.class("NSURL"), "URLWithString:", .{address}) orelse return true;
+        const address = objc.send(
+            Id,
+            cocoa.string("mailto:"),
+            "stringByAppendingString:",
+            .{link},
+        );
+        const url = objc.send(?Id, objc.class("NSURL"), "URLWithString:", .{address}) orelse {
+            return true;
+        };
         _ = objc.send(bool, workspace, "openURL:", .{url});
         return true;
     }
@@ -328,7 +367,12 @@ fn file_link_open(shown: *document.Document, destination: []const u8) void {
     const path_end = std.mem.indexOfAny(u8, destination, "?#") orelse destination.len;
     if (path_end == 0) return;
     const path_raw = cocoa.string(destination[0..path_end]);
-    var file_path = objc.send(?Id, path_raw, "stringByRemovingPercentEncoding", .{}) orelse path_raw;
+    var file_path = objc.send(
+        ?Id,
+        path_raw,
+        "stringByRemovingPercentEncoding",
+        .{},
+    ) orelse path_raw;
     if (!objc.send(bool, file_path, "isAbsolutePath", .{})) {
         const own_path = cocoa.string(shown.path());
         const directory = objc.send(Id, own_path, "stringByDeletingLastPathComponent", .{});
@@ -401,10 +445,14 @@ const Item = struct {
 const separator: Item = .{};
 
 fn menu_add(bar: Id, title: []const u8, items: []const Item) Id {
-    const menu = objc.autorelease(objc.send(Id, objc.alloc("NSMenu"), "initWithTitle:", .{cocoa.string(title)}));
+    const menu_allocated = objc.alloc("NSMenu");
+    const menu = objc.autorelease(
+        objc.send(Id, menu_allocated, "initWithTitle:", .{cocoa.string(title)}),
+    );
     for (items) |item| {
         if (item.title.len == 0) {
-            objc.send(void, menu, "addItem:", .{objc.send(Id, objc.class("NSMenuItem"), "separatorItem", .{})});
+            const separator_item = objc.send(Id, objc.class("NSMenuItem"), "separatorItem", .{});
+            objc.send(void, menu, "addItem:", .{separator_item});
             continue;
         }
         const menu_item = objc.send(Id, menu, "addItemWithTitle:action:keyEquivalent:", .{
@@ -424,28 +472,9 @@ fn menu_add(bar: Id, title: []const u8, items: []const Item) Id {
     return menu;
 }
 
-fn menu_bar_create() void {
-    const bar = objc.new("NSMenu");
+/// Adds the Edit menu. It is separate from `menu_bar_create` to keep that function short.
+fn menu_edit_add(bar: Id) void {
     const command_shift = Modifiers.command | Modifiers.shift;
-    const command_control = Modifiers.command | Modifiers.control;
-    const command_option = Modifiers.command | Modifiers.option;
-    _ = menu_add(bar, "Minied", &.{
-        .{ .title = "About Minied", .action = "orderFrontStandardAboutPanel:" },
-        separator,
-        .{ .title = "Hide Minied", .action = "hide:", .key = "h" },
-        .{ .title = "Hide Others", .action = "hideOtherApplications:", .key = "h", .modifiers = command_option },
-        .{ .title = "Show All", .action = "unhideAllApplications:" },
-        separator,
-        .{ .title = "Quit Minied", .action = "terminate:", .key = "q" },
-    });
-    _ = menu_add(bar, "File", &.{
-        .{ .title = "Open…", .action = "openDocument:", .key = "o" },
-        separator,
-        .{ .title = "Close", .action = "performClose:", .key = "w" },
-        .{ .title = "Reload", .action = "reloadDocument:", .key = "r" },
-        separator,
-        .{ .title = "Print…", .action = "print:", .key = "p" },
-    });
     _ = menu_add(bar, "Edit", &.{
         .{ .title = "Copy", .action = "copy:", .key = "c" },
         .{ .title = "Select All", .action = "selectAll:", .key = "a" },
@@ -459,17 +488,66 @@ fn menu_bar_create() void {
             .modifiers = command_shift,
             .tag = 3,
         },
-        .{ .title = "Use Selection for Find", .action = "performTextFinderAction:", .key = "e", .tag = 7 },
+        .{
+            .title = "Use Selection for Find",
+            .action = "performTextFinderAction:",
+            .key = "e",
+            .tag = 7,
+        },
     });
+}
+
+/// Adds the View menu. It is separate from `menu_bar_create` to keep that function short.
+fn menu_view_add(bar: Id) void {
+    const command_control = Modifiers.command | Modifiers.control;
     _ = menu_add(bar, "View", &.{
-        .{ .title = "Show Sidebar", .action = "toggleSidebar:", .key = "s", .modifiers = command_control },
+        .{
+            .title = "Show Sidebar",
+            .action = "toggleSidebar:",
+            .key = "s",
+            .modifiers = command_control,
+        },
         separator,
         .{ .title = "Actual Size", .action = "zoomReset:", .key = "0" },
         .{ .title = "Zoom In", .action = "zoomIn:", .key = "+" },
         .{ .title = "Zoom Out", .action = "zoomOut:", .key = "-" },
         separator,
-        .{ .title = "Enter Full Screen", .action = "toggleFullScreen:", .key = "f", .modifiers = command_control },
+        .{
+            .title = "Enter Full Screen",
+            .action = "toggleFullScreen:",
+            .key = "f",
+            .modifiers = command_control,
+        },
     });
+}
+
+fn menu_bar_create() void {
+    const bar = objc.new("NSMenu");
+    const command_option = Modifiers.command | Modifiers.option;
+    _ = menu_add(bar, "Minied", &.{
+        .{ .title = "About Minied", .action = "orderFrontStandardAboutPanel:" },
+        separator,
+        .{ .title = "Hide Minied", .action = "hide:", .key = "h" },
+        .{
+            .title = "Hide Others",
+            .action = "hideOtherApplications:",
+            .key = "h",
+            .modifiers = command_option,
+        },
+        .{ .title = "Show All", .action = "unhideAllApplications:" },
+        separator,
+        .{ .title = "Quit Minied", .action = "terminate:", .key = "q" },
+    });
+    _ = menu_add(bar, "File", &.{
+        .{ .title = "Open…", .action = "openDocument:", .key = "o" },
+        separator,
+        .{ .title = "Close", .action = "performClose:", .key = "w" },
+        .{ .title = "Reload", .action = "reloadDocument:", .key = "r" },
+        separator,
+        .{ .title = "Print…", .action = "print:", .key = "p" },
+    });
+    menu_edit_add(bar);
+    menu_view_add(bar);
     const window_menu = menu_add(bar, "Window", &.{
         .{ .title = "Minimize", .action = "performMiniaturize:", .key = "m" },
         .{ .title = "Zoom", .action = "performZoom:" },

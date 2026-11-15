@@ -205,7 +205,12 @@ fn load(document: *Document) LoadError!void {
     assert(document.open);
     const file_path = cocoa.string(document.path());
     const modified = file_modified(file_path) orelse return error.Unreadable;
-    const data = objc.send(?Id, objc.class("NSData"), "dataWithContentsOfFile:", .{file_path}) orelse {
+    const data = objc.send(
+        ?Id,
+        objc.class("NSData"),
+        "dataWithContentsOfFile:",
+        .{file_path},
+    ) orelse {
         return error.Unreadable;
     };
     const size = objc.send(usize, data, "length", .{});
@@ -254,7 +259,11 @@ fn title_update(document: *Document, file_path: Id, word_count: u32) void {
     const words_per_minute = 230;
     const minutes = @max(1, (word_count + words_per_minute / 2) / words_per_minute);
     var buffer: [64]u8 = undefined;
-    const subtitle = std.fmt.bufPrint(&buffer, "{d} words · {d} min read", .{ word_count, minutes }) catch {
+    const subtitle = std.fmt.bufPrint(
+        &buffer,
+        "{d} words · {d} min read",
+        .{ word_count, minutes },
+    ) catch {
         unreachable;
     };
     objc.send(void, window, "setSubtitle:", .{cocoa.string(subtitle)});
@@ -322,7 +331,8 @@ fn slug(title: []const u8, buffer: []u8) []const u8 {
     var count: usize = 0;
     for (title) |byte| {
         if (count == buffer.len) break;
-        const kept: ?u8 = if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte >= 0x80)
+        const kept: ?u8 = if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or
+            byte >= 0x80)
             std.ascii.toLower(byte)
         else if (byte == ' ')
             '-'
@@ -466,7 +476,9 @@ fn content_create(document: *Document, controller: Id) Id {
     objc.send(void, text_view, "setVerticallyResizable:", .{true});
     objc.send(void, text_view, "setHorizontallyResizable:", .{false});
     objc.send(void, text_view, "setAutoresizingMask:", .{autoresizing_width});
-    objc.send(void, text_view, "setMaxSize:", .{cocoa.Size{ .width = dimension_max, .height = dimension_max }});
+    objc.send(void, text_view, "setMaxSize:", .{
+        cocoa.Size{ .width = dimension_max, .height = dimension_max },
+    });
     objc.send(void, text_view, "setBackgroundColor:", .{cocoa.color("textBackgroundColor")});
     objc.send(void, text_view, "setUsesFindBar:", .{true});
     objc.send(void, text_view, "setIncrementalSearchingEnabled:", .{true});

@@ -11,7 +11,11 @@ const Output = struct {
     count: usize = 0,
 
     fn add(output: *Output, comptime fmt: []const u8, args: anytype) void {
-        const printed = std.fmt.bufPrint(output_buffer[output.count..], fmt, args) catch unreachable;
+        const printed = std.fmt.bufPrint(
+            output_buffer[output.count..],
+            fmt,
+            args,
+        ) catch unreachable;
         output.count += printed.len;
     }
 };
@@ -135,7 +139,10 @@ test "markdown: tables" {
             "<tr><td left>1</td><td right><code>x\\|y</code></td></tr>" ++
             "<tr><td left>only</td><td right></td></tr></table><p>after</p>",
     );
-    try expect("a | b\n--|--", "<table 2><tr head><td default>a</td><td default>b</td></tr></table>");
+    try expect(
+        "a | b\n--|--",
+        "<table 2><tr head><td default>a</td><td default>b</td></tr></table>",
+    );
     try expect("a | b\n---", "<h2>a | b</h>");
 }
 
@@ -172,7 +179,8 @@ fn balanced(events: []const markdown.Event) bool {
             depth -= 1;
             const start_name = @tagName(stack[depth]);
             const stem = name[0 .. name.len - "_end".len];
-            if (!std.mem.eql(u8, start_name[0 .. start_name.len - "_start".len], stem)) return false;
+            const start_stem = start_name[0 .. start_name.len - "_start".len];
+            if (!std.mem.eql(u8, start_stem, stem)) return false;
         }
     }
     return depth == 0;

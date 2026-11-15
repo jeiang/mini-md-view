@@ -89,7 +89,12 @@ const Frame = union(enum) {
     cell: Id,
 };
 
-const FontStyle = struct { mono: bool = false, bold: bool = false, italic: bool = false, size: u8 = 0 };
+const FontStyle = struct {
+    mono: bool = false,
+    bold: bool = false,
+    italic: bool = false,
+    size: u8 = 0,
+};
 const font_sizes_count = 9;
 const font_size_code_block = 7;
 const font_size_tiny = 8;
@@ -180,7 +185,12 @@ const Builder = struct {
         if (style.italic) {
             const trait_italic: usize = 1;
             const manager = objc.send(Id, objc.class("NSFontManager"), "sharedFontManager", .{});
-            created = objc.send(Id, manager, "convertFont:toHaveTrait:", .{ created, trait_italic });
+            created = objc.send(
+                Id,
+                manager,
+                "convertFont:toHaveTrait:",
+                .{ created, trait_italic },
+            );
         }
         slot.* = created;
         return created;
@@ -214,7 +224,11 @@ const Builder = struct {
         }
         if (builder.strike_depth > 0) {
             const style_single: isize = 1;
-            dictionary_set(result, cocoa.NSStrikethroughStyleAttributeName, cocoa.number(style_single));
+            dictionary_set(
+                result,
+                cocoa.NSStrikethroughStyleAttributeName,
+                cocoa.number(style_single),
+            );
         }
         return result;
     }
@@ -294,7 +308,9 @@ const Builder = struct {
         }
         const list = builder.list_current().?;
         var list_count: u32 = 0;
-        for (builder.frames[0..builder.frame_count]) |frame| list_count += @intFromBool(frame == .list);
+        for (builder.frames[0..builder.frame_count]) |frame| {
+            list_count += @intFromBool(frame == .list);
+        }
         const first_of_outer_list = list.item_count == 1 and list_count == 1;
         if (list.tight and !first_of_outer_list) return builder.scaled(size_body * 0.25);
         return normal;
@@ -412,14 +428,22 @@ const Builder = struct {
         const image = cocoa.symbol(if (checked) "checkmark.square.fill" else "square") orelse {
             return builder.append(if (checked) "☑" else "☐", marker_attributes);
         };
-        const tint = if (checked) cocoa.color("controlAccentColor") else cocoa.color("tertiaryLabelColor");
+        const tint = if (checked)
+            cocoa.color("controlAccentColor")
+        else
+            cocoa.color("tertiaryLabelColor");
         const configuration = objc.send(
             Id,
             objc.class("NSImageSymbolConfiguration"),
             "configurationWithHierarchicalColor:",
             .{tint},
         );
-        const tinted = objc.send(?Id, image, "imageWithSymbolConfiguration:", .{configuration}) orelse image;
+        const tinted = objc.send(
+            ?Id,
+            image,
+            "imageWithSymbolConfiguration:",
+            .{configuration},
+        ) orelse image;
         const side = builder.scaled(size_body * 1.05);
         const attachment = objc.new("NSTextAttachment");
         objc.send(void, attachment, "setImage:", .{tinted});
@@ -551,7 +575,8 @@ fn text_block_new(class_slot: *?Id, comptime name: [:0]const u8, draw: *const an
             .{ .name = block_draw_name, .types = block_draw_types, .implementation = draw },
         }, false);
     }
-    return objc.autorelease(objc.send(Id, objc.send(Id, class_slot.*.?, "alloc", .{}), "init", .{}));
+    const allocated = objc.send(Id, class_slot.*.?, "alloc", .{});
+    return objc.autorelease(objc.send(Id, allocated, "init", .{}));
 }
 
 /// Sets an absolute width on one edge of a text block layer.
@@ -668,7 +693,10 @@ fn heading_end(builder: *Builder) void {
     heading_record(builder);
     const top = builder.block_first and builder.frame_count == 0;
     const before_factor: f64 = if (top) 0 else if (level <= 2) 1.5 else 1.1;
-    builder.text_block_end(builder.scaled(size_body * before_factor), builder.scaled(size_body * 0.2));
+    builder.text_block_end(
+        builder.scaled(size_body * before_factor),
+        builder.scaled(size_body * 0.2),
+    );
     builder.heading_level = 0;
 }
 
@@ -811,7 +839,8 @@ fn mermaid_render(builder: *Builder, source: []const u8) ?[]const u8 {
     );
     mermaid.render(source, canvas.measurer, builder.options.scratch, &drawn) catch |err| {
         return switch (err) {
-            error.Syntax => "Diagram not shown: the source has an error or uses unsupported syntax.",
+            error.Syntax => "Diagram not shown: the source has an error or " ++
+                "uses unsupported syntax.",
             error.Overflow => overflow,
         };
     };
@@ -831,7 +860,9 @@ fn mermaid_render(builder: *Builder, source: []const u8) ?[]const u8 {
     content.diagram_count += 1;
 
     builder.paragraph_start = builder.length();
-    objc.send(void, builder.storage, "appendAttributedString:", .{canvas.attachment_string(diagram)});
+    objc.send(void, builder.storage, "appendAttributedString:", .{
+        canvas.attachment_string(diagram),
+    });
     const indent = builder.indent();
     builder.paragraph_end(.{
         .before = builder.gap() + builder.scaled(4),
@@ -1031,7 +1062,10 @@ fn notice_add(builder: *Builder) void {
         cocoa.NSForegroundColorAttributeName,
         cocoa.color("secondaryLabelColor"),
     );
-    builder.append("The rest of this document is not shown: it exceeds the viewer's limits.", notice_attributes);
+    builder.append(
+        "The rest of this document is not shown: it exceeds the viewer's limits.",
+        notice_attributes,
+    );
     builder.paragraph_end(.{ .before = builder.scaled(size_body) });
 }
 

@@ -177,7 +177,11 @@ const Scanner = struct {
         const next = scanner.byte_at(scanner.position + 1);
         if (next == '\n') {
             scanner.run_flush(scanner.position);
-            scanner.token_add(.{ .kind = .hard_break, .start = scanner.position, .end = scanner.position });
+            scanner.token_add(.{
+                .kind = .hard_break,
+                .start = scanner.position,
+                .end = scanner.position,
+            });
             scanner.advance_to(scanner.position + 2);
         } else if (std.ascii.isPunctuation(next)) {
             // Drop the backslash. The escaped character starts the next text run.
@@ -193,7 +197,9 @@ const Scanner = struct {
         const open_start = scanner.position;
         const length = run_length(scanner.rest(), '`');
         const content_start = open_start + length;
-        const search_end: u32 = @intCast(@min(scanner.text.len, content_start + code_span_size_max));
+        const search_end: u32 = @intCast(
+            @min(scanner.text.len, content_start + code_span_size_max),
+        );
         var cursor = content_start;
         while (cursor < search_end) {
             if (scanner.text[cursor] != '`') {
@@ -211,7 +217,11 @@ const Scanner = struct {
             const padded = content.len >= 2 and content[0] == ' ' and
                 content[content.len - 1] == ' ' and std.mem.indexOfNone(u8, content, " ") != null;
             const pad: u32 = @intFromBool(padded);
-            scanner.token_add(.{ .kind = .code, .start = content_start + pad, .end = cursor - pad });
+            scanner.token_add(.{
+                .kind = .code,
+                .start = content_start + pad,
+                .end = cursor - pad,
+            });
             return scanner.advance_to(cursor + length);
         }
         scanner.position += length;
@@ -325,7 +335,8 @@ const Scanner = struct {
                 return null;
             };
             const reference = scanner.text[after + 1 .. close];
-            const destination = scanner.definition_find(if (reference.len > 0) reference else label);
+            const reference_or_label = if (reference.len > 0) reference else label;
+            const destination = scanner.definition_find(reference_or_label);
             return .{ .destination = destination orelse return null, .end = @intCast(close + 1) };
         }
         return .{ .destination = scanner.definition_find(label) orelse return null, .end = after };
@@ -380,9 +391,15 @@ const Scanner = struct {
     fn scan_angle(scanner: *Scanner) void {
         const rest_bytes = scanner.rest();
         for ([_][]const u8{ "<br>", "<br/>", "<br />" }) |tag| {
-            if (rest_bytes.len >= tag.len and std.ascii.eqlIgnoreCase(rest_bytes[0..tag.len], tag)) {
+            const matches = rest_bytes.len >= tag.len and
+                std.ascii.eqlIgnoreCase(rest_bytes[0..tag.len], tag);
+            if (matches) {
                 scanner.run_flush(scanner.position);
-                scanner.token_add(.{ .kind = .hard_break, .start = scanner.position, .end = scanner.position });
+                scanner.token_add(.{
+                    .kind = .hard_break,
+                    .start = scanner.position,
+                    .end = scanner.position,
+                });
                 return scanner.advance_to(scanner.position + @as(u32, @intCast(tag.len)));
             }
         }
@@ -640,7 +657,8 @@ const Emitter = struct {
 fn token_event_count(token: *const Token) u32 {
     return switch (token.kind) {
         .skip => 0,
-        .delimiter => @as(u32, token.close_count) + token.open_count + @intFromBool(token.count > 0),
+        .delimiter => @as(u32, token.close_count) + token.open_count +
+            @intFromBool(token.count > 0),
         else => 1,
     };
 }

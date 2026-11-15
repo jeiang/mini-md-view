@@ -230,7 +230,10 @@ test "scene: append and overflow" {
     }));
 
     try scene.command_add(.{ .line = .{ .points = range } });
-    try std.testing.expectError(error.Overflow, scene.command_add(.{ .line = .{ .points = range } }));
+    try std.testing.expectError(
+        error.Overflow,
+        scene.command_add(.{ .line = .{ .points = range } }),
+    );
 
     try std.testing.expectEqualStrings("42%", try scene.text_print("{d}%", .{42}));
     try std.testing.expectError(error.Overflow, scene.text_add("ab"));

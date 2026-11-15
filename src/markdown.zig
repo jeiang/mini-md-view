@@ -459,7 +459,11 @@ const Parser = struct {
             .none => {},
             .paragraph => |paragraph| {
                 parser.leaf = .none;
-                parser.paragraph_close(paragraph.text_start, paragraph.heading_level, paragraph.first_in_item);
+                parser.paragraph_close(
+                    paragraph.text_start,
+                    paragraph.heading_level,
+                    paragraph.first_in_item,
+                );
             },
             .fenced, .indented_code => parser.event_add(.code_block_end),
             .table => parser.event_add(.table_end),
@@ -467,7 +471,12 @@ const Parser = struct {
         parser.leaf = .none;
     }
 
-    fn paragraph_close(parser: *Parser, text_start: u32, heading_level: u8, first_in_item: bool) void {
+    fn paragraph_close(
+        parser: *Parser,
+        text_start: u32,
+        heading_level: u8,
+        first_in_item: bool,
+    ) void {
         assert(text_start <= parser.text_count);
         assert(heading_level <= 2);
         var text: []u8 = parser.storage.text[text_start..parser.text_count];
@@ -771,7 +780,9 @@ fn table_delimiter_match(line: []const u8, aligns: *[table_columns_max]Align) ?u
     if (std.mem.indexOfNone(u8, line, "|-: \t") != null) return null;
     var content = std.mem.trim(u8, line, " \t");
     if (content.len > 0 and content[0] == '|') content = content[1..];
-    if (content.len > 0 and content[content.len - 1] == '|') content = content[0 .. content.len - 1];
+    if (content.len > 0 and content[content.len - 1] == '|') {
+        content = content[0 .. content.len - 1];
+    }
     var count: u8 = 0;
     var cells = std.mem.splitScalar(u8, content, '|');
     while (cells.next()) |cell_raw| {

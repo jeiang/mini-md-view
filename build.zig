@@ -1,7 +1,12 @@
 const std = @import("std");
 
 /// Frameworks that the app links. They are part of macOS: the project has no dependencies.
-const frameworks = [_][]const u8{ "AppKit", "CoreGraphics", "Foundation", "UniformTypeIdentifiers" };
+const frameworks = [_][]const u8{
+    "AppKit",
+    "CoreGraphics",
+    "Foundation",
+    "UniformTypeIdentifiers",
+};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -30,7 +35,10 @@ pub fn build(b: *std.Build) void {
     const bundle_exe = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = "Minied.app/Contents/MacOS" } },
     });
-    const bundle_plist = b.addInstallFile(b.path("assets/Info.plist"), "Minied.app/Contents/Info.plist");
+    const bundle_plist = b.addInstallFile(
+        b.path("assets/Info.plist"),
+        "Minied.app/Contents/Info.plist",
+    );
     b.getInstallStep().dependOn(&bundle_exe.step);
     b.getInstallStep().dependOn(&bundle_plist.step);
 

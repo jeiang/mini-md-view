@@ -40,7 +40,10 @@ fn attributes_for(font: scene.Font) Id {
     const index = @backingInt(font);
     if (font_attributes[index]) |attributes| return attributes;
     const attributes = objc.retain(objc.new("NSMutableDictionary"));
-    objc.send(void, attributes, "setObject:forKey:", .{ font_create(font), cocoa.NSFontAttributeName });
+    objc.send(void, attributes, "setObject:forKey:", .{
+        font_create(font),
+        cocoa.NSFontAttributeName,
+    });
     font_attributes[index] = attributes;
     return attributes;
 }
@@ -159,7 +162,11 @@ fn scene_draw(context: Context, drawn: *const scene.Scene) void {
         },
         .ellipse => |c| {
             cocoa.CGContextAddEllipseInRect(context, rect_convert(c.rect));
-            path_paint(context, .{ .fill = c.fill, .stroke = c.stroke, .stroke_width = c.stroke_width });
+            path_paint(context, .{
+                .fill = c.fill,
+                .stroke = c.stroke,
+                .stroke_width = c.stroke_width,
+            });
         },
         .polygon => |c| {
             const points = drawn.points_slice(c.points);
@@ -167,39 +174,71 @@ fn scene_draw(context: Context, drawn: *const scene.Scene) void {
             cocoa.CGContextMoveToPoint(context, points[0].x, points[0].y);
             for (points[1..]) |point| cocoa.CGContextAddLineToPoint(context, point.x, point.y);
             cocoa.CGContextClosePath(context);
-            path_paint(context, .{ .fill = c.fill, .stroke = c.stroke, .stroke_width = c.stroke_width });
+            path_paint(context, .{
+                .fill = c.fill,
+                .stroke = c.stroke,
+                .stroke_width = c.stroke_width,
+            });
         },
         .line => |c| {
             const points = drawn.points_slice(c.points);
             if (points.len < 2) continue;
             line_draw(context, points, c.smooth, c.head_start, c.head_end);
-            path_paint(context, .{ .stroke = c.stroke, .stroke_width = c.stroke_width, .dash = c.dash });
+            path_paint(context, .{
+                .stroke = c.stroke,
+                .stroke_width = c.stroke_width,
+                .dash = c.dash,
+            });
             const last = points.len - 1;
             head_draw(context, c.head_start, points[0], points[1], c.stroke, c.stroke_width);
-            head_draw(context, c.head_end, points[last], points[last - 1], c.stroke, c.stroke_width);
+            head_draw(
+                context,
+                c.head_end,
+                points[last],
+                points[last - 1],
+                c.stroke,
+                c.stroke_width,
+            );
         },
-        .wedge => |c| {
-            cocoa.CGContextMoveToPoint(context, c.center.x, c.center.y);
-            cocoa.CGContextAddArc(context, c.center.x, c.center.y, c.radius, c.angle_start, c.angle_end, 0);
-            cocoa.CGContextClosePath(context);
-            path_paint(context, .{ .fill = c.fill, .stroke = c.stroke });
-        },
-        .text => |c| {
-            const size = text_size(c.bytes, c.font);
-            const x: f64 = switch (c.anchor) {
-                .start => c.origin.x,
-                .middle => c.origin.x - size.width / 2,
-                .end => c.origin.x - size.width,
-            };
-            const origin: cocoa.Point = .{ .x = x, .y = c.origin.y - size.height / 2 };
-            const attributes = attributes_for(c.font);
-            objc.send(void, attributes, "setObject:forKey:", .{
-                color_resolve(c.color),
-                cocoa.NSForegroundColorAttributeName,
-            });
-            objc.send(void, cocoa.string(c.bytes), "drawAtPoint:withAttributes:", .{ origin, attributes });
-        },
+        .wedge => |c| wedge_draw(context, c),
+        .text => |c| text_draw(c),
     };
+}
+
+/// Draws one wedge command. It is separate from `scene_draw` to keep that function short.
+fn wedge_draw(context: Context, c: anytype) void {
+    cocoa.CGContextMoveToPoint(context, c.center.x, c.center.y);
+    cocoa.CGContextAddArc(
+        context,
+        c.center.x,
+        c.center.y,
+        c.radius,
+        c.angle_start,
+        c.angle_end,
+        0,
+    );
+    cocoa.CGContextClosePath(context);
+    path_paint(context, .{ .fill = c.fill, .stroke = c.stroke });
+}
+
+/// Draws one text command. It is separate from `scene_draw` to keep that function short.
+fn text_draw(c: anytype) void {
+    const size = text_size(c.bytes, c.font);
+    const x: f64 = switch (c.anchor) {
+        .start => c.origin.x,
+        .middle => c.origin.x - size.width / 2,
+        .end => c.origin.x - size.width,
+    };
+    const origin: cocoa.Point = .{ .x = x, .y = c.origin.y - size.height / 2 };
+    const attributes = attributes_for(c.font);
+    objc.send(void, attributes, "setObject:forKey:", .{
+        color_resolve(c.color),
+        cocoa.NSForegroundColorAttributeName,
+    });
+    objc.send(void, cocoa.string(c.bytes), "drawAtPoint:withAttributes:", .{
+        origin,
+        attributes,
+    });
 }
 
 /// How far a line is cut back at an end, so that it does not poke through the head's tip.
@@ -284,7 +323,8 @@ fn head_draw(
             path_paint(context, .{ .fill = color });
         },
         .arrow_open => {
-            head_polygon(context, tip, along, across, &.{ .{ 9, 4.5 }, .{ 0, 0 }, .{ 9, -4.5 } }, false);
+            const arrow_points: []const [2]f64 = &.{ .{ 9, 4.5 }, .{ 0, 0 }, .{ 9, -4.5 } };
+            head_polygon(context, tip, along, across, arrow_points, false);
             path_paint(context, hollow);
         },
         .cross => {
@@ -295,7 +335,8 @@ fn head_draw(
         .circle, .circle_filled => {
             const center_x = tip.x + along.x * 4;
             const center_y = tip.y + along.y * 4;
-            cocoa.CGContextAddEllipseInRect(context, cocoa.Rect.init(center_x - 4, center_y - 4, 8, 8));
+            const circle_rect = cocoa.Rect.init(center_x - 4, center_y - 4, 8, 8);
+            cocoa.CGContextAddEllipseInRect(context, circle_rect);
             path_paint(context, if (head == .circle) hollow else solid);
         },
         .diamond, .diamond_filled => {
@@ -304,7 +345,8 @@ fn head_draw(
             path_paint(context, if (head == .diamond) hollow else solid);
         },
         .triangle => {
-            head_polygon(context, tip, along, across, &.{ .{ 0, 0 }, .{ 12, 6.5 }, .{ 12, -6.5 } }, true);
+            const triangle_points: []const [2]f64 = &.{ .{ 0, 0 }, .{ 12, 6.5 }, .{ 12, -6.5 } };
+            head_polygon(context, tip, along, across, triangle_points, true);
             path_paint(context, hollow);
         },
     }
@@ -386,7 +428,8 @@ var cell_class: ?Id = null;
 
 fn cell_class_get() Id {
     if (cell_class) |defined| return defined;
-    const frame_name = "cellFrameForTextContainer:proposedLineFragment:glyphPosition:characterIndex:";
+    const frame_name =
+        "cellFrameForTextContainer:proposedLineFragment:glyphPosition:characterIndex:";
     cell_class = objc.class_define("MiniedDiagramCell", "NSTextAttachmentCell", &.{
         .{ .name = "cellSize", .types = cocoa.type_size ++ "@:", .implementation = &cell_size },
         .{
@@ -409,7 +452,8 @@ fn cell_class_get() Id {
 pub fn attachment_string(diagram: *const Diagram) Id {
     assert(diagram.scene.size.width > 0);
     assert(diagram.scene.size.height > 0);
-    const cell = objc.autorelease(objc.send(Id, objc.send(Id, cell_class_get(), "alloc", .{}), "init", .{}));
+    const cell_allocated = objc.send(Id, cell_class_get(), "alloc", .{});
+    const cell = objc.autorelease(objc.send(Id, cell_allocated, "init", .{}));
     objc.payload_set(cell, @constCast(diagram));
     const attachment = objc.new("NSTextAttachment");
     objc.send(void, attachment, "setAttachmentCell:", .{cell});

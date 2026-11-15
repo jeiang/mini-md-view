@@ -94,7 +94,9 @@ fn write_command(
         ),
         .polygon => |c| {
             try output.print("<polygon points=\"", .{});
-            for (scene.points_slice(c.points)) |p| try output.print("{d:.1},{d:.1} ", .{ p.x, p.y });
+            for (scene.points_slice(c.points)) |p| {
+                try output.print("{d:.1},{d:.1} ", .{ p.x, p.y });
+            }
             try output.print(
                 "\" fill=\"{s}\" stroke=\"{s}\" stroke-width=\"{d:.1}\"/>\n",
                 .{ color_css(c.fill), color_css(c.stroke), c.stroke_width },
@@ -115,11 +117,16 @@ fn write_command(
             "<path d=\"M{d:.1},{d:.1} L{d:.1},{d:.1} A{d:.1},{d:.1} 0 {d} 1 {d:.1},{d:.1} Z\" " ++
                 "fill=\"{s}\" stroke=\"{s}\"/>\n",
             .{
-                c.center.x,                                              c.center.y,
-                c.center.x + c.radius * @cos(c.angle_start),             c.center.y + c.radius * @sin(c.angle_start),
-                c.radius,                                                c.radius,
-                @intFromBool(c.angle_end - c.angle_start > std.math.pi), c.center.x + c.radius * @cos(c.angle_end),
-                c.center.y + c.radius * @sin(c.angle_end),               color_css(c.fill),
+                c.center.x,
+                c.center.y,
+                c.center.x + c.radius * @cos(c.angle_start),
+                c.center.y + c.radius * @sin(c.angle_start),
+                c.radius,
+                c.radius,
+                @intFromBool(c.angle_end - c.angle_start > std.math.pi),
+                c.center.x + c.radius * @cos(c.angle_end),
+                c.center.y + c.radius * @sin(c.angle_end),
+                color_css(c.fill),
                 color_css(c.stroke),
             },
         ),
@@ -144,9 +151,12 @@ fn write_text(output: *Output, text: anytype) error{Overflow}!void {
         "<text x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"{s}\" dominant-baseline=\"central\" " ++
             "fill=\"{s}\"{s}{s}>",
         .{
-            text.origin.x,                                           text.origin.y,
-            anchor,                                                  color_css(text.color),
-            if (text.font == .bold) " font-weight=\"bold\"" else "", if (text.font == .small) " font-size=\"11\"" else "",
+            text.origin.x,
+            text.origin.y,
+            anchor,
+            color_css(text.color),
+            if (text.font == .bold) " font-weight=\"bold\"" else "",
+            if (text.font == .small) " font-size=\"11\"" else "",
         },
     );
     for (text.bytes) |byte| switch (byte) {
