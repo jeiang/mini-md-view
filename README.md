@@ -2,9 +2,11 @@
 
 Minimal Markdown viewer for macOS without webviews. It renders Mermaid diagrams too.
 
-mini-md-view is written in Zig and follows [TigerStyle](docs/TIGER_STYLE.md). It has no
-dependencies apart from the Zig toolchain and the frameworks that ship with macOS. There is no web view: text
-is laid out by TextKit, and diagrams are drawn with CoreGraphics.
+mini-md-view is written in Zig and follows [TigerStyle](docs/TIGER_STYLE.md). Apart from the Zig
+toolchain and the frameworks that ship with macOS, its only dependency is tree-sitter, which
+highlights code. The build fetches tree-sitter and its grammars as Zig packages; they are not
+part of this repository. There is no web view: text is laid out by TextKit, and diagrams are
+drawn with CoreGraphics.
 
 ## Build and run
 
@@ -13,7 +15,7 @@ The Nix shell provides Zig and the macOS SDK.
 ```sh
 nix develop -c zig build                    # zig-out/MiniMdView.app
 nix develop -c zig build run -- README.md   # build, then open a file
-nix develop -c zig build test               # parser and diagram layout
+nix develop -c zig build test               # parser, diagram layout and highlighting
 nix develop -c zig build icon               # redraw the icon from tools/icon.zig
 open zig-out/MiniMdView.app --args "$PWD/README.md"
 ```
@@ -41,12 +43,18 @@ network.
 Mermaid: `flowchart`/`graph`, `sequenceDiagram`, `stateDiagram`, `classDiagram`, `erDiagram`,
 `pie` and `gantt`. A diagram that cannot be laid out is shown as its source, with the reason.
 
+Syntax highlighting: fenced code blocks in Bash, C, C++, CSS, Go, HTML, JavaScript, JSON, Nix,
+Python, Rust, TOML, TSX, TypeScript, YAML and Zig are colored with tree-sitter. The fence names
+the language, for example `py` or `python`. Other code blocks are shown plain. The licenses of
+tree-sitter and the grammars are in the app bundle, in `Contents/Resources/licenses`.
+
 ## Design
 
 | File | Role |
 |:-----|:-----|
 | `src/markdown.zig`, `src/markdown_inline.zig` | Markdown to a flat event stream |
 | `src/mermaid.zig`, `src/mermaid/` | Mermaid source to a display list |
+| `src/highlight.zig`, `src/highlight_languages.zig` | Code to colored spans, with tree-sitter |
 | `src/scene.zig` | The display list: shapes, lines and text with semantic colors |
 | `src/render.zig` | Events to an attributed string for TextKit |
 | `src/canvas.zig` | Display list to CoreGraphics, as a text attachment |
@@ -55,7 +63,8 @@ Mermaid: `flowchart`/`graph`, `sequenceDiagram`, `stateDiagram`, `classDiagram`,
 | `src/objc.zig`, `src/cocoa.zig` | Objective-C runtime bindings |
 
 The parser and the diagram layout are plain Zig. They do not allocate and do not recurse: all
-working memory is static, which bounds what the viewer accepts.
+working memory is static, which bounds what the viewer accepts. tree-sitter is the exception: it
+allocates with malloc, so highlighting has limits of size and time instead.
 
 | Limit | Value |
 |:------|------:|
@@ -64,7 +73,10 @@ working memory is static, which bounds what the viewer accepts.
 | Block nesting depth | 16 |
 | Diagrams per document | 64 |
 | Headings in the sidebar | 2048 |
+| Highlighted code block | 32 KB |
+| Colored spans per code block | 16384 |
+| Highlighting time | 0.1 s per block, 1 s per document |
 
 A file over 4 MB does not open. Past the other limits the viewer degrades: deeper nesting is
-shown as plain text, and a diagram or the tail of a document that does not fit is replaced by a
-notice.
+shown as plain text, a code block is shown without colors, and a diagram or the tail of a
+document that does not fit is replaced by a notice.
