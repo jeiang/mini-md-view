@@ -1,9 +1,9 @@
-# Minied
+# mini-md-view
 
-A native macOS viewer for Markdown files, with Mermaid diagrams.
+Minimal Markdown viewer for macOS without webviews. It renders Mermaid diagrams too.
 
-Minied is written in Zig and follows [TigerStyle](docs/TIGER_STYLE.md). It has no dependencies
-apart from the Zig toolchain and the frameworks that ship with macOS. There is no web view: text
+mini-md-view is written in Zig and follows [TigerStyle](docs/TIGER_STYLE.md). It has no
+dependencies apart from the Zig toolchain and the frameworks that ship with macOS. There is no web view: text
 is laid out by TextKit, and diagrams are drawn with CoreGraphics.
 
 ## Build and run
@@ -11,10 +11,10 @@ is laid out by TextKit, and diagrams are drawn with CoreGraphics.
 The Nix shell provides Zig and the macOS SDK.
 
 ```sh
-nix develop -c zig build                    # zig-out/Minied.app
+nix develop -c zig build                    # zig-out/MiniMdView.app
 nix develop -c zig build run -- README.md   # build, then open a file
 nix develop -c zig build test               # parser and diagram layout
-open zig-out/Minied.app --args "$PWD/README.md"
+open zig-out/MiniMdView.app --args "$PWD/README.md"
 ```
 
 The app needs Apple Silicon. Zig targets the macOS version of the build machine, so the binary
@@ -29,12 +29,12 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
 - Lists the headings in a sidebar. Select one to go to it.
 - Follows the system appearance and accent color.
 - Find, copy, print and zoom work on the whole document, diagrams included.
-- Links to headings scroll, links to other Markdown files open in Minied, and web and mail
+- Links to headings scroll, links to other Markdown files open in mini-md-view, and web and mail
   links go to the default application. A link to any other local file shows the file in Finder
   and does not open it, so a document cannot run a script with one click.
 
 Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough and
-autolinks. Raw HTML is shown as text. Images load from local files only: Minied never uses the
+autolinks. Raw HTML is shown as text. Images load from local files only: mini-md-view never uses the
 network.
 
 Mermaid: `flowchart`/`graph`, `sequenceDiagram`, `stateDiagram`, `classDiagram`, `erDiagram`,

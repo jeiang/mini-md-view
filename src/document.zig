@@ -367,14 +367,14 @@ fn window_create(document: *Document, controller: Id) void {
     );
     objc.send(void, window, "setReleasedWhenClosed:", .{false});
     objc.send(void, window, "setDelegate:", .{controller});
-    objc.send(void, window, "setTabbingIdentifier:", .{cocoa.string("MiniedDocument")});
+    objc.send(void, window, "setTabbingIdentifier:", .{cocoa.string("MiniMdViewDocument")});
     document.window = window;
 
     const toolbar = objc.autorelease(objc.send(
         Id,
         objc.alloc("NSToolbar"),
         "initWithIdentifier:",
-        .{cocoa.string("MiniedDocumentToolbar")},
+        .{cocoa.string("MiniMdViewDocumentToolbar")},
     ));
     const display_icon_only: usize = 2;
     const style_unified: isize = 3;
@@ -404,7 +404,7 @@ fn window_create(document: *Document, controller: Id) void {
     objc.send(void, window, "setContentSize:", .{frame.size});
     objc.send(void, window, "setContentMinSize:", .{cocoa.Size{ .width = 520, .height = 320 }});
     objc.send(void, window, "center", .{});
-    _ = objc.send(bool, window, "setFrameAutosaveName:", .{cocoa.string("MiniedDocumentWindow")});
+    _ = objc.send(bool, window, "setFrameAutosaveName:", .{cocoa.string("MiniMdViewDocumentWindow")});
 
     const center = objc.send(Id, objc.class("NSNotificationCenter"), "defaultCenter", .{});
     objc.send(void, center, "addObserver:selector:name:object:", .{

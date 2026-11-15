@@ -1,5 +1,5 @@
 {
-  description = "minied";
+  description = "mini-md-view";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -16,16 +16,16 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        minied = pkgs.stdenv.mkDerivation {
-          pname = "minied";
+        mini-md-view = pkgs.stdenv.mkDerivation {
+          pname = "mini-md-view";
           version = "0.0.0";
           src = self;
           nativeBuildInputs = [ pkgs.zig.hook ];
           # AppKit enables Liquid Glass only for binaries linked against the macOS 26 SDK or newer.
           buildInputs = [ pkgs.apple-sdk_27 ];
-          meta.mainProgram = "minied";
+          meta.mainProgram = "mini-md-view";
         };
-        default = minied;
+        default = mini-md-view;
       });
 
       devShells = forAllSystems (pkgs: {

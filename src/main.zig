@@ -1,4 +1,4 @@
-//! Minied: a native macOS viewer for Markdown files.
+//! mini-md-view: a native macOS viewer for Markdown files.
 //!
 //! This file is the application shell: the controller object that AppKit calls back, the menu
 //! bar, and the launch sequence. One controller instance serves as the delegate of the
@@ -16,8 +16,8 @@ const Selector = objc.Selector;
 const extensions = [_][]const u8{ "md", "markdown", "mdown", "mkd", "mdx", "txt" };
 const refresh_interval_seconds = 1.0;
 
-const toolbar_zoom_out = "MiniedZoomOut";
-const toolbar_zoom_in = "MiniedZoomIn";
+const toolbar_zoom_out = "MiniMdViewZoomOut";
+const toolbar_zoom_in = "MiniMdViewZoomIn";
 
 var controller: Id = undefined;
 
@@ -40,7 +40,7 @@ pub fn main() void {
 fn controller_class() Id {
     const frame_changed = "viewFrameChanged:";
     const toolbar_item = "toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:";
-    return objc.class_define("MiniedController", "NSObject", &.{
+    return objc.class_define("MiniMdViewController", "NSObject", &.{
         .{
             .name = "applicationDidFinishLaunching:",
             .types = "v@:@",
@@ -534,10 +534,10 @@ fn menu_view_add(bar: Id) void {
 fn menu_bar_create() void {
     const bar = objc.new("NSMenu");
     const command_option = Modifiers.command | Modifiers.option;
-    _ = menu_add(bar, "Minied", &.{
-        .{ .title = "About Minied", .action = "orderFrontStandardAboutPanel:" },
+    _ = menu_add(bar, "mini-md-view", &.{
+        .{ .title = "About mini-md-view", .action = "orderFrontStandardAboutPanel:" },
         separator,
-        .{ .title = "Hide Minied", .action = "hide:", .key = "h" },
+        .{ .title = "Hide mini-md-view", .action = "hide:", .key = "h" },
         .{
             .title = "Hide Others",
             .action = "hideOtherApplications:",
@@ -546,7 +546,7 @@ fn menu_bar_create() void {
         },
         .{ .title = "Show All", .action = "unhideAllApplications:" },
         separator,
-        .{ .title = "Quit Minied", .action = "terminate:", .key = "q" },
+        .{ .title = "Quit mini-md-view", .action = "terminate:", .key = "q" },
     });
     _ = menu_add(bar, "File", &.{
         .{ .title = "Open…", .action = "openDocument:", .key = "o" },

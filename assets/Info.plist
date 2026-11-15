@@ -5,15 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>minied</string>
+	<string>mini-md-view</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.minied.Minied</string>
+	<string>dev.mini-md-view.MiniMdView</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Minied</string>
+	<string>mini-md-view</string>
 	<key>CFBundleDisplayName</key>
-	<string>Minied</string>
+	<string>mini-md-view</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

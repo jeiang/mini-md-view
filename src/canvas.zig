@@ -446,7 +446,7 @@ fn cell_class_get() Id {
     if (cell_class) |defined| return defined;
     const frame_name =
         "cellFrameForTextContainer:proposedLineFragment:glyphPosition:characterIndex:";
-    cell_class = objc.class_define("MiniedDiagramCell", "NSTextAttachmentCell", &.{
+    cell_class = objc.class_define("MiniMdViewDiagramCell", "NSTextAttachmentCell", &.{
         .{ .name = "cellSize", .types = cocoa.type_size ++ "@:", .implementation = &cell_size },
         .{
             .name = frame_name,

@@ -667,7 +667,7 @@ fn container_end(builder: *Builder) void {
 
 fn quote_begin(builder: *Builder) void {
     builder.marker_flush();
-    const block = text_block_new(&quote_block_class, "MiniedQuoteBlock", &quote_block_draw);
+    const block = text_block_new(&quote_block_class, "MiniMdViewQuoteBlock", &quote_block_draw);
     block_fill_width(block);
     block_edge_set(block, .margin, .y_min, builder.gap());
     block_edge_set(block, .margin, .x_min, builder.indent());
@@ -757,7 +757,7 @@ fn code_begin(builder: *Builder, info: []const u8) void {
 }
 
 fn code_block_open(builder: *Builder) void {
-    const block = text_block_new(&code_block_class, "MiniedCodeBlock", &code_block_draw);
+    const block = text_block_new(&code_block_class, "MiniMdViewCodeBlock", &code_block_draw);
     block_fill_width(block);
     block_edge_set(block, .margin, .y_min, builder.gap());
     block_edge_set(block, .margin, .x_min, builder.indent());

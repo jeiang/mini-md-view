@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
-        .name = "minied",
+        .name = "mini-md-view",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -31,13 +31,13 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(exe);
 
-    // The application bundle: `zig-out/Minied.app`.
+    // The application bundle: `zig-out/MiniMdView.app`.
     const bundle_exe = b.addInstallArtifact(exe, .{
-        .dest_dir = .{ .override = .{ .custom = "Minied.app/Contents/MacOS" } },
+        .dest_dir = .{ .override = .{ .custom = "MiniMdView.app/Contents/MacOS" } },
     });
     const bundle_plist = b.addInstallFile(
         b.path("assets/Info.plist"),
-        "Minied.app/Contents/Info.plist",
+        "MiniMdView.app/Contents/Info.plist",
     );
     b.getInstallStep().dependOn(&bundle_exe.step);
     b.getInstallStep().dependOn(&bundle_plist.step);

@@ -165,7 +165,7 @@ pub const Method = struct {
     implementation: *const anyopaque,
 };
 
-const payload_name = "minied_payload";
+const payload_name = "mini_md_view_payload";
 
 /// Defines and registers a class. With `payload`, instances get one pointer-sized instance
 /// variable, which `payload_set` and `payload_get` access.
