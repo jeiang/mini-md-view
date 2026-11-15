@@ -119,6 +119,7 @@ fn controller_class() Id {
         .{ .name = "zoomReset:", .types = "v@:@", .implementation = &action_zoom_reset },
         .{ .name = "goBack:", .types = "v@:@", .implementation = &action_go_back },
         .{ .name = "goForward:", .types = "v@:@", .implementation = &action_go_forward },
+        .{ .name = "loadRemoteImages:", .types = "v@:@", .implementation = &action_remote_load },
         .{ .name = "validateMenuItem:", .types = "B@:@", .implementation = &validate_item },
         .{ .name = "validateToolbarItem:", .types = "B@:@", .implementation = &validate_item },
         .{ .name = "windowWillClose:", .types = "v@:@", .implementation = &window_will_close },
@@ -359,6 +360,10 @@ fn action_go_forward(_: Id, _: Selector, sender: ?Id) callconv(.c) void {
     history_go(sender, .forward);
 }
 
+fn action_remote_load(_: Id, _: Selector, sender: ?Id) callconv(.c) void {
+    if (sender_document(sender)) |shown| document.remote_retry(shown);
+}
+
 fn history_go(sender: ?Id, direction: history.Direction) void {
     const shown = sender_document(sender) orelse return;
     const file_path = document.history_peek(shown, direction) orelse return;
@@ -406,6 +411,7 @@ fn validate_item(_: Id, _: Selector, item: Id) callconv(.c) bool {
     if (action == objc.selector("goForward:")) {
         return document.history_peek(shown, .forward) != null;
     }
+    if (action == objc.selector("loadRemoteImages:")) return shown.remote_missing;
     return true;
 }
 
@@ -748,6 +754,8 @@ fn menu_view_add(bar: Id) void {
         .{ .title = "Actual Size", .action = "zoomReset:", .key = "0" },
         .{ .title = "Zoom In", .action = "zoomIn:", .key = "+" },
         .{ .title = "Zoom Out", .action = "zoomOut:", .key = "-" },
+        separator,
+        .{ .title = "Load Remote Images", .action = "loadRemoteImages:" },
         separator,
         .{
             .title = "Enter Full Screen",

@@ -42,13 +42,18 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
   Finder and does not open it, so a document cannot run a script with one click.
 - Back and Forward (Go menu, Command-[ and Command-], or the toolbar) return to the files and
   scroll positions that a window showed. Each window keeps its last 32 steps.
+- Loads an image from the network only after you approve it. A document with `https` images
+  shows a warning that lists each address in full. When an approved address redirects, the
+  viewer does not follow it, and asks about the new address. The decision lasts until the
+  viewer quits, and View > Load Remote Images asks again. The viewer keeps no cookies and no
+  cache. It does not load images over plain `http`, or from an address with a user name,
+  non-ASCII characters or spaces, because such an address can hide its real host.
 
 Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough, autolinks,
 alerts and footnotes, and YAML front matter. Of raw HTML, comments are hidden, `<br>`,
 `<img>` (with `width` and `height`) and `<a href>` work, and the tags `p`, `div`, `span`,
 `center` and `picture` are dropped but keep their content. Other HTML is shown as text.
-Images load from local files only: mini-md-view never uses the
-network.
+Images load from local files, and from `https` addresses that you approve.
 
 Mermaid: `flowchart`/`graph`, `sequenceDiagram`, `stateDiagram`, `classDiagram`, `erDiagram`,
 `pie` and `gantt`. A diagram that cannot be laid out is shown as its source, with the reason.
@@ -68,7 +73,9 @@ tree-sitter and the grammars are in the app bundle, in `Contents/Resources/licen
 | `src/scene.zig` | The display list: shapes, lines and text with semantic colors |
 | `src/render.zig` | Events to an attributed string for TextKit |
 | `src/canvas.zig` | Display list to CoreGraphics, as a text attachment |
+| `src/remote.zig`, `src/address.zig` | Remote images: which addresses, approval and fetching |
 | `src/document.zig` | The document pool, windows, loading and reloading |
+| `src/history.zig` | The files and scroll positions that a window showed |
 | `src/main.zig` | Application delegate, menus, toolbar |
 | `src/objc.zig`, `src/cocoa.zig` | Objective-C runtime bindings |
 
@@ -83,6 +90,9 @@ allocates with malloc, so highlighting has limits of size and time instead.
 | Block nesting depth | 16 |
 | Diagrams per document | 64 |
 | Headings in the sidebar | 2048 |
+| Footnotes | 256 |
+| Back and Forward steps per window | 32 |
+| Remote image | 16 MB, 64 million pixels |
 | Highlighted code block | 32 KB |
 | Colored spans per code block | 16384 |
 | Highlighting time | 0.1 s per block, 1 s per document |

@@ -2,6 +2,7 @@
 //! highlighting.
 
 test {
+    _ = @import("address.zig");
     _ = @import("markdown.zig");
     _ = @import("history.zig");
     _ = @import("mermaid.zig");

@@ -13,6 +13,7 @@ const objc = @import("objc.zig");
 const cocoa = @import("cocoa.zig");
 const markdown = @import("markdown.zig");
 const render = @import("render.zig");
+const remote = @import("remote.zig");
 const history = @import("history.zig");
 const Id = objc.Id;
 
@@ -54,6 +55,8 @@ pub const Document = struct {
     heading_clicked_scroll: f64,
     /// The outline selection changes because of scrolling, not because of the user.
     outline_selecting: bool,
+    /// The last render left out remote images, which were not fetched or not approved.
+    remote_missing: bool,
     content: render.Content,
 
     pub fn path(document: *const Document) []const u8 {
@@ -86,6 +89,7 @@ pub fn init() void {
     for (&documents) |*document| document.open = false;
     const saved = objc.send(f64, defaults(), "doubleForKey:", .{cocoa.string(zoom_key)});
     if (saved >= zoom_min and saved <= zoom_max) zoom_level = saved;
+    remote.init();
 }
 
 fn defaults() Id {
@@ -138,6 +142,7 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     document.notice = null;
     document.outline_selecting = false;
     document.heading_clicked = null;
+    document.remote_missing = false;
     window_create(document, controller);
     document.open = true;
     document.modified = file_read(document, cocoa.string(file_path)) catch |err| {
@@ -381,6 +386,20 @@ pub fn rerender(document: *Document) void {
     show(document, scroll_get(document));
 }
 
+/// Shows the images that arrived, in every document that waits for remote images.
+pub fn remote_arrived() void {
+    for (&documents) |*document| {
+        if (document.open and document.remote_missing) rerender(document);
+    }
+}
+
+/// Asks again about the remote images of the document that the user declined or that failed.
+pub fn remote_retry(document: *Document) void {
+    assert(document.open);
+    remote.retry();
+    rerender(document);
+}
+
 pub const ZoomChange = enum { in, out, reset };
 
 /// Changes the zoom of every window and saves it.
@@ -438,11 +457,13 @@ fn show(document: *Document, scroll: ?f64) void {
         &parse_storage,
         document.source_buffer[0..document.source_length],
     );
+    const remote_missing = objc.new("NSMutableArray");
     const attributed = render.build(parsed.events, &document.content, .{
         .zoom = zoom_level,
         .directory = objc.send(Id, file_path, "stringByDeletingLastPathComponent", .{}),
         .scratch = &scratch,
         .truncated = parsed.truncated,
+        .remote_missing = remote_missing,
     });
     // The outline can ask for a row while the text view takes the new text.
     document.heading_level_min = 6;
@@ -451,6 +472,10 @@ fn show(document: *Document, scroll: ?f64) void {
     }
     objc.send(void, document.text_storage, "setAttributedString:", .{attributed});
     document.word_count = parsed.word_count;
+    document.remote_missing = objc.send(usize, remote_missing, "count", .{}) > 0;
+    if (document.remote_missing) {
+        remote.request(remote_missing, objc.send(Id, file_path, "lastPathComponent", .{}));
+    }
     objc.send(void, document.outline_view, "reloadData", .{});
     title_update(document);
     if (scroll) |y| scroll_set(document, y);

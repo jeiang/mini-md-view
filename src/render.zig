@@ -9,10 +9,12 @@ const std = @import("std");
 const assert = std.debug.assert;
 const objc = @import("objc.zig");
 const cocoa = @import("cocoa.zig");
+const address = @import("address.zig");
 const canvas = @import("canvas.zig");
 const markdown = @import("markdown.zig");
 const mermaid = @import("mermaid.zig");
 const highlight = @import("highlight.zig");
+const remote = @import("remote.zig");
 const scene = @import("scene.zig");
 const Id = objc.Id;
 
@@ -104,6 +106,8 @@ pub const Options = struct {
     /// Working memory for diagram layout.
     scratch: []u8,
     truncated: bool,
+    /// NSMutableArray that receives the URL of every remote image that is not fetched yet.
+    remote_missing: Id,
 };
 
 const Frame = union(enum) {
@@ -1324,9 +1328,19 @@ fn image_begin(builder: *Builder, image_event: markdown.Image) void {
     builder.image_hidden_depth = 1;
 }
 
-/// Loads an image from a local file. Remote images are not fetched: the viewer never uses the
-/// network.
+/// Loads an image from a local file, or takes a remote image that was fetched before. The
+/// renderer never uses the network: it notes a remote image that is missing, and the document
+/// asks the user about it.
 fn image_load(builder: *Builder, source: []const u8) ?Id {
+    if (address.fetchable(source)) {
+        switch (remote.lookup(cocoa.string(source))) {
+            .image => |image| return image,
+            .missing => |missing| {
+                objc.send(void, builder.options.remote_missing, "addObject:", .{missing});
+                return null;
+            },
+        }
+    }
     var path_bytes = source;
     if (std.mem.startsWith(u8, path_bytes, "file://")) {
         path_bytes = path_bytes["file://".len..];
