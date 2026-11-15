@@ -36,8 +36,11 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
   links go to the default application. A link to any other local file shows the file in Finder
   and does not open it, so a document cannot run a script with one click.
 
-Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough and
-autolinks. Raw HTML is shown as text. Images load from local files only: mini-md-view never uses the
+Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough, autolinks,
+alerts and footnotes, and YAML front matter. Of raw HTML, comments are hidden, `<br>`,
+`<img>` (with `width` and `height`) and `<a href>` work, and the tags `p`, `div`, `span`,
+`center` and `picture` are dropped but keep their content. Other HTML is shown as text.
+Images load from local files only: mini-md-view never uses the
 network.
 
 Mermaid: `flowchart`/`graph`, `sequenceDiagram`, `stateDiagram`, `classDiagram`, `erDiagram`,
@@ -80,3 +83,8 @@ allocates with malloc, so highlighting has limits of size and time instead.
 A file over 4 MB does not open. Past the other limits the viewer degrades: deeper nesting is
 shown as plain text, a code block is shown without colors, and a diagram or the tail of a
 document that does not fit is replaced by a notice.
+
+## License
+
+mini-md-view is under the [MIT license](LICENSE). `docs/TIGER_STYLE.md` is a copy of TigerBeetle's
+style guide, which is under the [Apache License 2.0](docs/TIGER_STYLE.LICENSE).

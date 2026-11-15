@@ -13,6 +13,10 @@
         "aarch64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # build.zig.zon holds the one version number.
+      version = builtins.head (
+        builtins.match ".*\\.version = \"([^\"]+)\".*" (builtins.readFile ./build.zig.zon)
+      );
       # The Zig packages from build.zig.zon: tree-sitter and its grammars. Update the hash when
       # the dependencies change. The default fetch skips the lazy dependencies of the packages,
       # which the build does not use.
@@ -38,7 +42,7 @@
       packages = forAllSystems (pkgs: rec {
         mini-md-view = pkgs.stdenv.mkDerivation {
           pname = "mini-md-view";
-          version = "0.0.0";
+          inherit version;
           src = self;
           nativeBuildInputs = [ pkgs.zig.hook ];
           preBuild = ''
@@ -52,7 +56,10 @@
             mkdir -p $out/Applications
             mv $out/MiniMdView.app $out/Applications/
           '';
-          meta.mainProgram = "mini-md-view";
+          meta = {
+            license = nixpkgs.lib.licenses.mit;
+            mainProgram = "mini-md-view";
+          };
         };
         default = mini-md-view;
       });

@@ -1,7 +1,8 @@
 //! Markdown parser: source bytes to a flat stream of events.
 //!
 //! The parser handles the CommonMark block structure (containers and leaf blocks) plus the GFM
-//! tables, task lists, strikethrough and autolink extensions. HTML is not interpreted: it is
+//! tables, task lists, strikethrough, autolink and alert extensions, and YAML front matter. Of
+//! HTML it interprets only comments and a few tags (see `markdown_inline.zig`); all other HTML is
 //! passed through as text. The output is a flat, well-nested event stream instead of a tree, so
 //! that consumers iterate it with a small explicit stack and no recursion.
 //!
@@ -18,6 +19,8 @@ pub const tokens_max = inline_parser.tokens_max;
 pub const definitions_max = 512;
 pub const depth_max = 16;
 pub const table_columns_max = 32;
+/// Footnote definitions that references can find. Further references stay text.
+pub const footnotes_max = 256;
 
 /// Events that one line can emit outside of inline content: closing and opening every container,
 /// a leaf block, and one table row.
@@ -29,9 +32,11 @@ comptime {
 pub const Align = enum(u8) { default, left, center, right };
 pub const Task = enum(u8) { none, unchecked, checked };
 pub const List = struct { ordered: bool, start: u32, tight: bool };
+/// The kind of a GFM alert, a block quote that starts with a marker such as `[!NOTE]`.
+pub const Alert = enum(u8) { none, note, tip, important, warning, caution };
 
 pub const Event = union(enum) {
-    blockquote_start,
+    blockquote_start: Alert,
     blockquote_end,
     list_start: List,
     list_end,
@@ -55,11 +60,17 @@ pub const Event = union(enum) {
     row_end,
     cell_start: Align,
     cell_end,
+    /// A footnote definition, which the parser moves to the end of the document. Payload is
+    /// the footnote number, from 1.
+    footnote_start: u32,
+    footnote_end,
 
     text: []const u8,
     code: []const u8,
     soft_break,
     hard_break,
+    /// Payload is the footnote number, from 1.
+    footnote_reference: u32,
     emphasis_start,
     emphasis_end,
     strong_start,
@@ -69,12 +80,24 @@ pub const Event = union(enum) {
     /// Payload is the link destination.
     link_start: []const u8,
     link_end,
-    /// Payload is the image source. The events up to `image_end` are the alternative text.
-    image_start: []const u8,
+    /// The events up to `image_end` are the alternative text.
+    image_start: Image,
     image_end,
 };
 
 pub const Definition = struct { label: []const u8, destination: []const u8 };
+/// The display size is in pixels, and zero where the source does not give it.
+pub const Image = struct { source: []const u8, width: u32 = 0, height: u32 = 0 };
+
+pub const Footnote = struct {
+    label: []const u8,
+    /// The footnote number, by first reference, or zero while it has no reference.
+    number: u32 = 0,
+    /// The definition's events in the document, from its `footnote_start` to after its
+    /// `footnote_end`. The end is zero until the definition was parsed.
+    event_start: u32 = 0,
+    event_end: u32 = 0,
+};
 
 pub const Storage = struct {
     events: [events_max]Event,
@@ -83,6 +106,7 @@ pub const Storage = struct {
     text: [source_size_max]u8,
     tokens: [tokens_max]inline_parser.Token,
     definitions: [definitions_max]Definition,
+    footnotes: [footnotes_max]Footnote,
 };
 
 pub const Result = struct {
@@ -96,6 +120,9 @@ const Container = union(enum) {
     blockquote,
     list: struct { ordered: bool, marker: u8, event_index: u32 },
     item: struct { content_indent: u32, event_index: u32, child_count: u32 },
+    /// The index of the footnote that the definition belongs to. A definition without a
+    /// footnote, such as a repeated one, is parsed and then dropped.
+    footnote: ?u32,
 };
 
 const Leaf = union(enum) {
@@ -104,6 +131,8 @@ const Leaf = union(enum) {
     fenced: struct { marker: u8, length: u32, indent: u32 },
     indented_code: struct { blank_count: u32 },
     table: struct { column_count: u8, aligns: [table_columns_max]Align },
+    /// An HTML comment block, which is not shown.
+    comment,
 };
 
 const Indent = struct { columns: u32, bytes: u32 };
@@ -127,6 +156,9 @@ const Parser = struct {
     event_count: u32 = 0,
     text_count: u32 = 0,
     definition_count: u32 = 0,
+    footnote_definition_count: u32 = 0,
+    /// Footnote numbers given out so far.
+    footnote_count: u32 = 0,
     word_count: u32 = 0,
     truncated: bool = false,
     containers: [depth_max]Container = undefined,
@@ -134,8 +166,9 @@ const Parser = struct {
     leaf: Leaf = .none,
     /// A blank line was seen inside a list. The next block decides whether that list is loose.
     blank_pending: bool = false,
-    /// The event count at that blank line. Lists that were opened later are not affected.
     blank_event_count: u32 = 0,
+    /// The innermost container that the current line opened is a block quote.
+    quote_opened: bool = false,
 
     fn event_add(parser: *Parser, event: Event) void {
         assert(parser.event_count < events_max);
@@ -178,6 +211,8 @@ const Parser = struct {
             .text = text,
             .tokens = &parser.storage.tokens,
             .definitions = parser.storage.definitions[0..parser.definition_count],
+            .footnotes = parser.storage.footnotes[0..parser.footnote_definition_count],
+            .footnote_count = &parser.footnote_count,
             .events = parser.storage.events[parser.event_count..][0..free],
         });
         parser.event_count += result.event_count;
@@ -206,6 +241,11 @@ const Parser = struct {
                     if (indent.columns < item.content_indent) break;
                     rest = columns_skip(rest, item.content_indent);
                 },
+                .footnote => {
+                    if (is_blank(rest)) continue;
+                    if (indent.columns < footnote_indent) break;
+                    rest = columns_skip(rest, footnote_indent);
+                },
             }
         }
         assert(count <= parser.container_count);
@@ -217,11 +257,17 @@ const Parser = struct {
         assert(parser.leaf == .none);
         while (parser.container_count > count_target) {
             parser.container_count -= 1;
-            parser.event_add(switch (parser.containers[parser.container_count]) {
-                .blockquote => .blockquote_end,
-                .list => .list_end,
-                .item => .item_end,
-            });
+            switch (parser.containers[parser.container_count]) {
+                .blockquote => parser.event_add(.blockquote_end),
+                .list => parser.event_add(.list_end),
+                .item => parser.event_add(.item_end),
+                .footnote => |footnote| {
+                    parser.event_add(.footnote_end);
+                    if (footnote) |index| {
+                        parser.storage.footnotes[index].event_end = parser.event_count;
+                    }
+                },
+            }
         }
     }
 
@@ -238,8 +284,21 @@ const Parser = struct {
     fn containers_open(parser: *Parser, line: []const u8) []const u8 {
         var rest = line;
         var iterations: u32 = 0;
+        parser.quote_opened = false;
         while (iterations < depth_max) : (iterations += 1) {
             if (parser.container_count + 2 > depth_max) break;
+            // Only a dangling list can be open when the line is at the top level.
+            const top_level = parser.container_count == 0 or
+                (parser.container_count == 1 and parser.containers[0] == .list);
+            if (top_level and iterations == 0) {
+                if (footnote_definition_match(rest)) |definition| {
+                    parser.leaf_close();
+                    parser.list_dangling_close();
+                    parser.footnote_open(definition.label);
+                    rest = std.mem.trimStart(u8, rest[definition.content_offset..], " \t");
+                    continue;
+                }
+            }
             const indent = indent_of(rest);
             if (indent.columns >= 4) break;
             const content = rest[indent.bytes..];
@@ -247,7 +306,8 @@ const Parser = struct {
                 parser.leaf_close();
                 parser.list_dangling_close();
                 parser.container_push(.blockquote);
-                parser.event_add(.blockquote_start);
+                parser.event_add(.{ .blockquote_start = .none });
+                parser.quote_opened = true;
                 rest = content[1..];
                 if (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
                 continue;
@@ -261,9 +321,25 @@ const Parser = struct {
             }
             parser.leaf_close();
             parser.item_open(marker, indent.columns);
+            parser.quote_opened = false;
             rest = content[marker.content_offset..];
         }
         return rest;
+    }
+
+    /// Opens a footnote definition. Definitions are only at the top level, so they never nest.
+    fn footnote_open(parser: *Parser, label: []const u8) void {
+        assert(parser.container_count == 0);
+        assert(parser.leaf == .none);
+        const footnotes = parser.storage.footnotes[0..parser.footnote_definition_count];
+        var owner: ?u32 = inline_parser.footnote_find(footnotes, label);
+        if (owner) |index| {
+            // Only the first definition of a label is shown.
+            if (footnotes[index].event_end != 0) owner = null;
+        }
+        if (owner) |index| footnotes[index].event_start = parser.event_count;
+        parser.container_push(.{ .footnote = owner });
+        parser.event_add(.{ .footnote_start = 0 });
     }
 
     fn item_open(parser: *Parser, marker: Marker, indent_columns: u32) void {
@@ -322,6 +398,13 @@ const Parser = struct {
             if (matched_all) return parser.fenced_line(match.rest);
             parser.leaf_close();
         }
+        if (parser.leaf == .comment) {
+            if (matched_all) {
+                if (std.mem.indexOf(u8, match.rest, "-->") != null) parser.leaf_close();
+                return;
+            }
+            parser.leaf_close();
+        }
         const blank = is_blank(match.rest);
         if (!matched_all) {
             if (parser.leaf == .paragraph and !blank and !block_start_match(match.rest, false)) {
@@ -336,6 +419,14 @@ const Parser = struct {
         const rest = parser.containers_open(match.rest);
         parser.list_dangling_close();
         parser.looseness_update();
+        if (parser.quote_opened) {
+            if (alert_match(rest)) |alert| {
+                // The marker line is not shown: it only sets the kind of the quote.
+                assert(parser.storage.events[parser.event_count - 1] == .blockquote_start);
+                parser.storage.events[parser.event_count - 1] = .{ .blockquote_start = alert };
+                return;
+            }
+        }
         parser.leaf_process(rest);
     }
 
@@ -344,7 +435,7 @@ const Parser = struct {
             .paragraph, .table => parser.leaf_close(),
             .indented_code => |*code| code.blank_count += 1,
             .none => {},
-            .fenced => unreachable,
+            .fenced, .comment => unreachable,
         }
         for (parser.containers[0..parser.container_count]) |container| {
             if (container == .item and !parser.blank_pending) {
@@ -389,6 +480,11 @@ const Parser = struct {
                 return parser.leaf_close();
             }
             if (parser.table_open(content)) return;
+        }
+        if (parser.leaf == .none and std.mem.startsWith(u8, content, "<!--")) {
+            // The comment runs to the line that contains `-->`, which can be this one.
+            if (std.mem.indexOf(u8, content, "-->") == null) parser.leaf = .comment;
+            return;
         }
         if (atx_match(content)) |heading| {
             parser.leaf_close();
@@ -456,7 +552,7 @@ const Parser = struct {
 
     fn leaf_close(parser: *Parser) void {
         switch (parser.leaf) {
-            .none => {},
+            .none, .comment => {},
             .paragraph => |paragraph| {
                 parser.leaf = .none;
                 parser.paragraph_close(
@@ -495,7 +591,13 @@ const Parser = struct {
             text = text[4..];
         }
         parser.event_add(.paragraph_start);
+        const event_count_text = parser.event_count;
         parser.inlines_add(text);
+        // A paragraph that has only hidden HTML in it is not shown.
+        if (parser.event_count == event_count_text) {
+            parser.event_count -= 1;
+            return;
+        }
         parser.event_add(.paragraph_end);
     }
 
@@ -536,39 +638,133 @@ const Parser = struct {
         parser.event_add(.row_end);
     }
 
-    /// Collects link reference definitions, so that links can refer to later definitions.
+    /// Collects link reference definitions and footnote labels, so that references can find
+    /// definitions that come later. A footnote definition starts at the first column.
     fn definitions_collect(parser: *Parser, source: []const u8) void {
         assert(parser.definition_count == 0);
-        var fence_marker: u8 = 0;
+        assert(parser.footnote_definition_count == 0);
+        var fence: ?Fence = null;
+        var comment = false;
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |line| {
-            if (parser.definition_count == definitions_max) break;
-            const indent = indent_of(line);
-            if (indent.columns >= 4) continue;
-            const content = line[indent.bytes..];
-            if (fence_open_match(content)) |fence| {
-                if (fence_marker == 0) {
-                    fence_marker = fence.marker;
-                } else if (fence_marker == fence.marker) {
-                    fence_marker = 0;
-                }
+            if (comment) {
+                comment = std.mem.indexOf(u8, line, "-->") == null;
                 continue;
             }
-            if (fence_marker != 0) continue;
-            if (definition_match(std.mem.trimEnd(u8, content, " \t\r"))) |definition| {
+            const indent = indent_of(line);
+            if (indent.columns >= 4) continue;
+            const content = std.mem.trimEnd(u8, line[indent.bytes..], " \t\r");
+            if (fence) |open| {
+                const run = run_length(content, open.marker);
+                if (run >= open.length and run == content.len) fence = null;
+                continue;
+            }
+            if (fence_open_match(content)) |fence_open| {
+                fence = fence_open;
+                continue;
+            }
+            if (std.mem.startsWith(u8, content, "<!--")) {
+                comment = std.mem.indexOf(u8, content, "-->") == null;
+                continue;
+            }
+            if (footnote_definition_match(line)) |definition| {
+                if (parser.footnote_definition_count == footnotes_max) continue;
+                parser.storage.footnotes[parser.footnote_definition_count] = .{
+                    .label = definition.label,
+                };
+                parser.footnote_definition_count += 1;
+            } else if (definition_match(content)) |definition| {
+                if (parser.definition_count == definitions_max) continue;
                 parser.storage.definitions[parser.definition_count] = definition;
                 parser.definition_count += 1;
             }
         }
+    }
+
+    /// Emits YAML front matter as a code block. Returns the size of the front matter in bytes.
+    fn front_matter_add(parser: *Parser, source: []const u8) usize {
+        assert(parser.event_count == 0);
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        const first = lines.first();
+        if (!std.mem.eql(u8, std.mem.trimEnd(u8, first, "\r"), "---")) return 0;
+        const body_start = lines.index orelse return 0;
+        // Without a closing line there is no front matter.
+        const body_end = while (lines.next()) |line| {
+            const content = std.mem.trimEnd(u8, line, "\r");
+            if (std.mem.eql(u8, content, "---") or std.mem.eql(u8, content, "...")) {
+                break @intFromPtr(line.ptr) - @intFromPtr(source.ptr);
+            }
+        } else return 0;
+        const end = lines.index orelse source.len;
+        assert(body_start <= body_end);
+        assert(body_end < end);
+
+        parser.event_add(.{ .code_block_start = "yaml" });
+        var body = std.mem.splitScalar(u8, source[body_start..body_end], '\n');
+        while (body.next()) |line| {
+            if (body.index == null and line.len == 0) break;
+            if (parser.events_free() < 4 * events_reserve) {
+                parser.truncated = true;
+                break;
+            }
+            parser.event_add(.{ .code_line = std.mem.trimEnd(u8, line, "\r") });
+        }
+        parser.event_add(.code_block_end);
+        return end;
+    }
+
+    /// Moves the definitions of referenced footnotes to the end, in number order, below a rule.
+    /// Definitions without a reference are dropped.
+    fn footnotes_finish(parser: *Parser) void {
+        assert(parser.container_count == 0);
+        assert(parser.footnote_count <= parser.footnote_definition_count);
+        const events = &parser.storage.events;
+        const footnotes = parser.storage.footnotes[0..parser.footnote_definition_count];
+        const body_end = parser.event_count;
+        var number: u32 = 1;
+        while (number <= parser.footnote_count) : (number += 1) {
+            const footnote = for (footnotes) |*footnote| {
+                if (footnote.number == number) break footnote;
+            } else unreachable;
+            if (footnote.event_end == 0) continue;
+            assert(events[footnote.event_start] == .footnote_start);
+            assert(events[footnote.event_end - 1] == .footnote_end);
+            const inner = events[footnote.event_start + 1 .. footnote.event_end - 1];
+            if (parser.events_free() < inner.len + 3) {
+                parser.truncated = true;
+                break;
+            }
+            if (parser.event_count == body_end) parser.event_add(.thematic_break);
+            parser.event_add(.{ .footnote_start = number });
+            @memcpy(events[parser.event_count..][0..inner.len], inner);
+            parser.event_count += @intCast(inner.len);
+            parser.event_add(.footnote_end);
+        }
+        // Remove the definitions from where they were written.
+        var write: u32 = 0;
+        var read: u32 = 0;
+        while (read < body_end) {
+            if (events[read] == .footnote_start) {
+                while (events[read] != .footnote_end) read += 1;
+                read += 1;
+                continue;
+            }
+            events[write] = events[read];
+            write += 1;
+            read += 1;
+        }
+        assert(read == body_end);
+        std.mem.copyForwards(Event, events[write..], events[body_end..parser.event_count]);
+        parser.event_count = write + (parser.event_count - body_end);
     }
 };
 
 pub fn parse(storage: *Storage, source: []const u8) Result {
     assert(source.len <= source_size_max);
     var parser: Parser = .{ .storage = storage };
-    parser.definitions_collect(source);
+    var line_start = parser.front_matter_add(source);
+    parser.definitions_collect(source[line_start..]);
 
-    var line_start: usize = 0;
     while (line_start < source.len) {
         if (parser.events_free() < 4 * events_reserve) {
             parser.truncated = true;
@@ -581,6 +777,7 @@ pub fn parse(storage: *Storage, source: []const u8) Result {
     }
     parser.leaf_close();
     parser.containers_close(0);
+    parser.footnotes_finish();
 
     assert(parser.container_count == 0);
     assert(parser.event_count <= events_max);
@@ -725,6 +922,18 @@ fn list_marker_match(line: []const u8) ?Marker {
     return marker;
 }
 
+/// Matches the first line of a GFM alert, such as `[!NOTE]`, in any letter case.
+fn alert_match(line: []const u8) ?Alert {
+    const content = std.mem.trimEnd(u8, line, " ");
+    if (content.len < 4 or content[0] != '[' or content[1] != '!') return null;
+    if (content[content.len - 1] != ']') return null;
+    const name = content[2 .. content.len - 1];
+    for (std.enums.values(Alert)[1..]) |alert| {
+        if (std.ascii.eqlIgnoreCase(name, @tagName(alert))) return alert;
+    }
+    return null;
+}
+
 /// Whether the line starts a block that ends the open paragraph or table. When the block would
 /// be a sibling of the paragraph, only a non-empty list item that starts at 1 interrupts it.
 fn block_start_match(line: []const u8, sibling: bool) bool {
@@ -732,6 +941,7 @@ fn block_start_match(line: []const u8, sibling: bool) bool {
     if (indent.columns >= 4) return false;
     const content = line[indent.bytes..];
     if (content.len == 0) return false;
+    if (indent.bytes == 0 and footnote_definition_match(content) != null) return true;
     if (content[0] == '>') return true;
     if (thematic_break_match(content)) return true;
     if (atx_match(content) != null) return true;
@@ -802,6 +1012,17 @@ fn table_delimiter_match(line: []const u8, aligns: *[table_columns_max]Align) ?u
     // A lone `---` is a setext underline or a thematic break, not a table.
     if (count == 1 and std.mem.indexOfScalar(u8, line, '|') == null) return null;
     return count;
+}
+
+/// Footnote definitions continue on lines indented by this many columns.
+const footnote_indent = 4;
+
+/// Matches `[^label]:` at the start of a line. Returns the label, and where the content starts.
+fn footnote_definition_match(line: []const u8) ?struct { label: []const u8, content_offset: u32 } {
+    const label = inline_parser.footnote_label_match(line) orelse return null;
+    const label_end: u32 = @intCast(label.len + "[^]".len);
+    if (label_end >= line.len or line[label_end] != ':') return null;
+    return .{ .label = label, .content_offset = label_end + 1 };
 }
 
 /// Matches `[label]: destination "optional title"`.
