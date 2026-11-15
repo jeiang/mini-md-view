@@ -798,7 +798,7 @@ fn content_create(document: *Document, controller: Id) Id {
     const frame = cocoa.Rect.init(0, 0, 840, 780);
     const dimension_max = 1.0e7;
     const text_storage = objc.send(Id, objc.alloc("NSTextStorage"), "init", .{});
-    const layout_manager = objc.new("NSLayoutManager");
+    const layout_manager = render.layout_manager_new();
     objc.send(void, text_storage, "addLayoutManager:", .{layout_manager});
     const container = objc.autorelease(objc.send(
         Id,

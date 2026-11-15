@@ -26,6 +26,7 @@ const Ivar = *opaque {};
 extern "c" fn objc_getClass(name: [*:0]const u8) ?Id;
 extern "c" fn sel_registerName(name: [*:0]const u8) Selector;
 extern "c" fn objc_msgSend() void;
+extern "c" fn objc_msgSendSuper() void;
 extern "c" fn objc_allocateClassPair(superclass: Id, name: [*:0]const u8, extra_bytes: usize) ?Id;
 extern "c" fn objc_registerClassPair(class: Id) void;
 extern "c" fn class_addMethod(
@@ -121,6 +122,22 @@ pub fn send(
     const Function = MessageFunction(Return, @TypeOf(arguments));
     const function: *const Function = @ptrCast(&objc_msgSend);
     return @call(.auto, function, .{ target, selector(name) } ++ arguments);
+}
+
+/// Sends a message to the implementation in a superclass, as `[super name]` does in a method of a
+/// class that `class_define` made.
+pub fn send_super(
+    comptime Return: type,
+    target: Id,
+    comptime superclass_name: [:0]const u8,
+    comptime name: [:0]const u8,
+    arguments: anytype,
+) Return {
+    const Super = extern struct { receiver: Id, class: Id };
+    var super: Super = .{ .receiver = target, .class = class(superclass_name) };
+    const Function = MessageFunction(Return, @TypeOf(arguments));
+    const function: *const Function = @ptrCast(&objc_msgSendSuper);
+    return @call(.auto, function, .{ @as(Id, @ptrCast(&super)), selector(name) } ++ arguments);
 }
 
 /// `[[Class alloc] init]`, autoreleased.
