@@ -147,6 +147,7 @@ pub fn open(file_path: []const u8, controller: Id) OpenError!void {
     show(document, null);
     watch_start(document);
     recent_note(document);
+    paths_store();
     inset_update(document);
     objc.send(void, document.window, "makeKeyAndOrderFront:", .{@as(?Id, null)});
 }
@@ -159,6 +160,33 @@ fn recent_note(document: *const Document) void {
     const class = objc.class("NSDocumentController");
     const controller = objc.send(Id, class, "sharedDocumentController", .{});
     objc.send(void, controller, "noteNewRecentDocumentURL:", .{url});
+}
+
+const paths_key = "OpenDocuments";
+
+/// Saves the paths of the open documents, which the next launch opens again.
+pub fn paths_store() void {
+    const paths = objc.new("NSMutableArray");
+    for (&documents) |*document| {
+        if (document.open) objc.send(void, paths, "addObject:", .{cocoa.string(document.path())});
+    }
+    objc.send(void, defaults(), "setObject:forKey:", .{ paths, cocoa.string(paths_key) });
+}
+
+/// Opens the documents that were open when the app quit. Files that cannot be opened any more
+/// are skipped without an alert.
+pub fn reopen(controller: Id) void {
+    const key = cocoa.string(paths_key);
+    const stored = objc.send(?Id, defaults(), "stringArrayForKey:", .{key}) orelse return;
+    // Each open stores the paths again, which replaces the array in the defaults.
+    const paths = objc.autorelease(objc.retain(stored));
+    const count = objc.send(usize, paths, "count", .{});
+    for (0..@min(count, documents_max)) |index| {
+        const file_path = cocoa.string_bytes(objc.send(Id, paths, "objectAtIndex:", .{index}));
+        if (file_path.len == 0) continue;
+        open(file_path, controller) catch {};
+    }
+    paths_store();
 }
 
 /// Releases the document's objects. The controller calls this when the window closes.

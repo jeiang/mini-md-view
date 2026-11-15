@@ -19,6 +19,11 @@ const toolbar_zoom_out = "MiniMdViewZoomOut";
 const toolbar_zoom_in = "MiniMdViewZoomIn";
 
 var controller: Id = undefined;
+/// The command line or Finder named files to open, so the last session is not reopened.
+var files_requested = false;
+/// AppKit closes the windows when the app quits. Those closes keep the documents in the set
+/// that the next launch reopens.
+var terminating = false;
 
 fn app() Id {
     return objc.send(Id, objc.class("NSApplication"), "sharedApplication", .{});
@@ -50,6 +55,11 @@ fn controller_class() Id {
             .name = "applicationShouldHandleReopen:hasVisibleWindows:",
             .types = "B@:@B",
             .implementation = &should_handle_reopen,
+        },
+        .{
+            .name = "applicationShouldTerminate:",
+            .types = "Q@:@",
+            .implementation = &should_terminate,
         },
         .{
             .name = "applicationSupportsSecureRestorableState:",
@@ -110,6 +120,7 @@ fn controller_class() Id {
 
 fn did_finish_launching(_: Id, _: Selector, _: ?Id) callconv(.c) void {
     arguments_open();
+    if (!files_requested) document.reopen(controller);
     objc.send(void, app(), "activateIgnoringOtherApps:", .{true});
     if (document.open_count() == 0) open_panel_run();
 }
@@ -122,27 +133,44 @@ fn arguments_open() void {
     const count = objc.send(usize, arguments, "count", .{});
     var index: usize = 1;
     while (index < count) : (index += 1) {
-        var file_path = objc.send(Id, arguments, "objectAtIndex:", .{index});
+        const file_path = objc.send(Id, arguments, "objectAtIndex:", .{index});
         const argument = cocoa.string_bytes(file_path);
         if (argument.len == 0) continue;
         if (argument[0] == '-') {
             index += 1;
             continue;
         }
-        if (!objc.send(bool, file_path, "isAbsolutePath", .{})) {
-            const manager = objc.send(Id, objc.class("NSFileManager"), "defaultManager", .{});
-            const directory = objc.send(Id, manager, "currentDirectoryPath", .{});
-            file_path = objc.send(Id, directory, "stringByAppendingPathComponent:", .{file_path});
-        }
-        path_open(objc.send(Id, file_path, "stringByStandardizingPath", .{}));
+        files_requested = true;
+        path_open(path_absolute(file_path));
     }
+}
+
+/// Resolves a path from the command line against the working directory. AppKit also passes such
+/// paths to `application:openFiles:` as they were typed.
+fn path_absolute(file_path: Id) Id {
+    var absolute = file_path;
+    if (!objc.send(bool, file_path, "isAbsolutePath", .{})) {
+        const manager = objc.send(Id, objc.class("NSFileManager"), "defaultManager", .{});
+        const directory = objc.send(Id, manager, "currentDirectoryPath", .{});
+        absolute = objc.send(Id, directory, "stringByAppendingPathComponent:", .{file_path});
+    }
+    return objc.send(Id, absolute, "stringByStandardizingPath", .{});
 }
 
 fn open_files(_: Id, _: Selector, _: ?Id, file_names: Id) callconv(.c) void {
     const count = objc.send(usize, file_names, "count", .{});
-    for (0..count) |index| path_open(objc.send(Id, file_names, "objectAtIndex:", .{index}));
+    files_requested = true;
+    for (0..count) |index| {
+        path_open(path_absolute(objc.send(Id, file_names, "objectAtIndex:", .{index})));
+    }
     const reply_success: usize = 0;
     objc.send(void, app(), "replyToOpenOrPrint:", .{reply_success});
+}
+
+fn should_terminate(_: Id, _: Selector, _: ?Id) callconv(.c) usize {
+    terminating = true;
+    const terminate_now: usize = 1;
+    return terminate_now;
 }
 
 fn should_handle_reopen(_: Id, _: Selector, _: ?Id, has_visible_windows: bool) callconv(.c) bool {
@@ -335,7 +363,9 @@ fn recent_menu_update(_: Id, _: Selector, menu: Id) callconv(.c) void {
 
 fn window_will_close(_: Id, _: Selector, notification: Id) callconv(.c) void {
     const window = objc.send(?Id, notification, "object", .{});
-    if (document.find(.window, window)) |closing| document.close(closing);
+    const closing = document.find(.window, window) orelse return;
+    document.close(closing);
+    if (!terminating) document.paths_store();
 }
 
 fn view_frame_changed(_: Id, _: Selector, notification: Id) callconv(.c) void {
