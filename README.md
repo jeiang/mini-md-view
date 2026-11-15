@@ -17,8 +17,9 @@ nix develop -c zig build test                 # tests the parser and the diagram
 open zig-out/Minied.app --args "$PWD/README.md"
 ```
 
-The app needs macOS 26 or later on Apple Silicon. It must be linked against the macOS 26 SDK or
-later, because AppKit gives the Liquid Glass design only to such binaries. The flake pins the SDK.
+The app needs Apple Silicon. Zig targets the macOS version of the build machine, so the binary
+needs that version or later. It must be linked against the macOS 26 SDK or later, because AppKit
+gives the Liquid Glass design only to such binaries. The flake provides that SDK.
 
 ## What it does
 
