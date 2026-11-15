@@ -677,17 +677,112 @@ fn code_span_append(builder: *Builder, bytes: []const u8) void {
 
 var layout_manager_class: ?Id = null;
 
-/// An autoreleased layout manager that draws inline code backgrounds.
+/// An autoreleased layout manager that draws inline code backgrounds and finds the glyphs of
+/// tall table rows.
 pub fn layout_manager_new() Id {
     if (layout_manager_class == null) {
-        layout_manager_class = objc.class_define("MiniMdLayoutManager", "NSLayoutManager", &.{.{
-            .name = "drawBackgroundForGlyphRange:atPoint:",
-            .types = "v@:" ++ cocoa.type_range ++ cocoa.type_point,
-            .implementation = &layout_draw_background,
-        }}, false);
+        const bounding_types = cocoa.type_range ++ "@:" ++ cocoa.type_rect ++ "@";
+        layout_manager_class = objc.class_define("MiniMdLayoutManager", "NSLayoutManager", &.{
+            .{
+                .name = "drawBackgroundForGlyphRange:atPoint:",
+                .types = "v@:" ++ cocoa.type_range ++ cocoa.type_point,
+                .implementation = &layout_draw_background,
+            },
+            .{
+                .name = bounding_name,
+                .types = bounding_types,
+                .implementation = &layout_glyphs_in_rect(bounding_name),
+            },
+            .{
+                .name = bounding_name_without_layout,
+                .types = bounding_types,
+                .implementation = &layout_glyphs_in_rect(bounding_name_without_layout),
+            },
+        }, false);
     }
     const allocated = objc.send(Id, layout_manager_class.?, "alloc", .{});
     return objc.autorelease(objc.send(Id, allocated, "init", .{}));
+}
+
+const bounding_name = "glyphRangeForBoundingRect:inTextContainer:";
+const bounding_name_without_layout = "glyphRangeForBoundingRectWithoutAdditionalLayout:" ++
+    "inTextContainer:";
+
+/// TextKit finds no glyphs for a thin rectangle inside a table row when the rectangle meets
+/// only the padding of the cells, for example below the last line of most cells in a tall row.
+/// A text view then draws nothing there, not even the cell borders, and scrolling leaves gaps.
+/// So the range grows to every table that the top or the bottom edge of the rectangle is in.
+fn layout_glyphs_in_rect(comptime name: [:0]const u8) fn (
+    Id,
+    objc.Selector,
+    cocoa.Rect,
+    Id,
+) callconv(.c) cocoa.Range {
+    return struct {
+        fn glyphs_in_rect(
+            manager: Id,
+            _: objc.Selector,
+            rect: cocoa.Rect,
+            container: Id,
+        ) callconv(.c) cocoa.Range {
+            var result = objc.send_super(cocoa.Range, manager, "NSLayoutManager", name, .{
+                rect,
+                container,
+            });
+            const storage = objc.send(?Id, manager, "textStorage", .{}) orelse return result;
+            const length = objc.send(usize, storage, "length", .{});
+            for ([2]f64{ rect.origin.y, rect.origin.y + rect.size.height }) |y| {
+                const glyph = objc.send(
+                    usize,
+                    manager,
+                    "glyphIndexForPoint:inTextContainer:fractionOfDistanceThroughGlyph:",
+                    .{ cocoa.Point{ .x = rect.origin.x, .y = y }, container, @as(?*f64, null) },
+                );
+                const character = objc.send(usize, manager, "characterIndexForGlyphAtIndex:", .{
+                    glyph,
+                });
+                if (character >= length) continue;
+                const table = text_table_at(storage, character) orelse continue;
+                const characters = objc.send(cocoa.Range, storage, "rangeOfTextTable:atIndex:", .{
+                    table,
+                    character,
+                });
+                result = range_union(result, objc.send(
+                    cocoa.Range,
+                    manager,
+                    "glyphRangeForCharacterRange:actualCharacterRange:",
+                    .{ characters, @as(?*cocoa.Range, null) },
+                ));
+            }
+            return result;
+        }
+    }.glyphs_in_rect;
+}
+
+/// The innermost table that the paragraph at a string position is in.
+fn text_table_at(storage: Id, location: usize) ?Id {
+    const style = objc.send(?Id, storage, "attribute:atIndex:effectiveRange:", .{
+        cocoa.NSParagraphStyleAttributeName,
+        location,
+        @as(?*cocoa.Range, null),
+    }) orelse return null;
+    const blocks = objc.send(Id, style, "textBlocks", .{});
+    var index = objc.send(usize, blocks, "count", .{});
+    while (index > 0) {
+        index -= 1;
+        const block = objc.send(Id, blocks, "objectAtIndex:", .{index});
+        if (objc.send(bool, block, "isKindOfClass:", .{objc.class("NSTextTableBlock")})) {
+            return objc.send(Id, block, "table", .{});
+        }
+    }
+    return null;
+}
+
+fn range_union(a: cocoa.Range, b: cocoa.Range) cocoa.Range {
+    if (a.length == 0) return b;
+    if (b.length == 0) return a;
+    const start = @min(a.location, b.location);
+    return .{ .location = start, .length = @max(a.location + a.length, b.location + b.length) - start };
 }
 
 fn layout_draw_background(
