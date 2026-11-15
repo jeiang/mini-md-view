@@ -9,6 +9,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const objc = @import("objc.zig");
 const cocoa = @import("cocoa.zig");
+const address = @import("address.zig");
 const canvas = @import("canvas.zig");
 const markdown = @import("markdown.zig");
 const mermaid = @import("mermaid.zig");
@@ -1195,11 +1196,14 @@ fn image_begin(builder: *Builder, image_event: markdown.Image) void {
 /// renderer never uses the network: it notes a remote image that is missing, and the document
 /// asks the user about it.
 fn image_load(builder: *Builder, source: []const u8) ?Id {
-    if (remote.is_remote(source)) {
-        const url = cocoa.string(source);
-        if (remote.image(url)) |image| return image;
-        objc.send(void, builder.options.remote_missing, "addObject:", .{url});
-        return null;
+    if (address.fetchable(source)) {
+        switch (remote.lookup(cocoa.string(source))) {
+            .image => |image| return image,
+            .missing => |missing| {
+                objc.send(void, builder.options.remote_missing, "addObject:", .{missing});
+                return null;
+            },
+        }
     }
     var path_bytes = source;
     if (std.mem.startsWith(u8, path_bytes, "file://")) {

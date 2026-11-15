@@ -1,6 +1,7 @@
 //! Test root for the platform-independent core: the Markdown parser and diagram layout.
 
 test {
+    _ = @import("address.zig");
     _ = @import("markdown.zig");
     _ = @import("history.zig");
     _ = @import("mermaid.zig");

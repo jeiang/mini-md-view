@@ -41,8 +41,11 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
 - Back and Forward (Go menu, Command-[ and Command-], or the toolbar) return to the files and
   scroll positions that a window showed. Each window keeps its last 32 steps.
 - Loads an image from the network only after you approve it. A document with `https` images
-  shows a warning that lists each address in full. The decision lasts until the viewer quits,
-  and View > Load Remote Images asks again. Images over plain `http` are not loaded.
+  shows a warning that lists each address in full. When an approved address redirects, the
+  viewer does not follow it, and asks about the new address. The decision lasts until the
+  viewer quits, and View > Load Remote Images asks again. The viewer keeps no cookies and no
+  cache. It does not load images over plain `http`, or from an address with a user name,
+  non-ASCII characters or spaces, because such an address can hide its real host.
 
 Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough, autolinks,
 alerts and footnotes, and YAML front matter. Of raw HTML, comments are hidden, `<br>`,

@@ -1,35 +1,41 @@
 //! Remote images: the only part of the viewer that uses the network.
 //!
-//! A document can name images by `https` URL. Nothing is fetched for a URL until the user
-//! approves it in a warning that lists every address in full. A decision lasts until the app
-//! quits, so a reload does not ask again. Plain `http` is not fetched at all.
+//! A document can name images by `https` address (see `address.zig` for which ones). Nothing is
+//! fetched from an address until the user approves it in a warning that lists every address in
+//! full. That holds for a redirect too: the viewer does not follow it, and asks about the new
+//! address instead. A decision lasts until the app quits, so a reload does not ask again.
 //!
-//! Fetched images stay in memory, keyed by URL. The renderer only looks an image up: a document
-//! with missing images is rendered again when one arrives.
+//! Fetched images stay in memory, keyed by address. The renderer only looks an image up: a
+//! document with missing images is rendered again when one arrives.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const objc = @import("objc.zig");
 const cocoa = @import("cocoa.zig");
+const address = @import("address.zig");
 const document = @import("document.zig");
 const Id = objc.Id;
 const Selector = objc.Selector;
 
-/// URLs that one warning lists. More remote images in one document are not loaded.
-pub const sources_max = 64;
-/// URLs with a decision. Past this, further remote images are not loaded.
+/// Addresses that one warning lists. A document with more gets another warning for the rest.
+const sources_max = 64;
+/// Addresses with a decision. Past this, further remote images are not loaded.
 const states_max = 512;
+const redirects_max = 5;
 const image_size_max = 16 * 1024 * 1024;
+/// A small file can declare a huge picture, which would take gigabytes to draw.
+const image_pixels_max = 64 * 1024 * 1024;
 const request_timeout_seconds = 30.0;
 const resource_timeout_seconds = 120.0;
 /// Images often arrive close together: one render shows all that came in this time.
 const arrival_delay_seconds = 0.1;
 
-/// What is known about a URL, besides a loaded image. Stored as NSNumber.
+/// What is known about an address, besides a loaded image or a redirect. Stored as NSNumber.
 const State = enum(isize) { declined, fetching, failed };
 
 var delegate: Id = undefined;
-/// NSMutableDictionary from the URL (NSString) to its NSImage, or to a `State`.
+/// NSMutableDictionary from an address (NSString) to its NSImage, to the address that it
+/// redirects to (NSString), or to a `State`.
 var states: Id = undefined;
 /// NSMutableDictionary from a task identifier to the NSMutableData received so far.
 var buffers: Id = undefined;
@@ -45,6 +51,11 @@ pub fn init() void {
             .implementation = &task_received,
         },
         .{
+            .name = "URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:",
+            .types = "v@:@@@@@?",
+            .implementation = &task_redirected,
+        },
+        .{
             .name = "URLSession:task:didCompleteWithError:",
             .types = "v@:@@@",
             .implementation = &task_completed,
@@ -55,38 +66,52 @@ pub fn init() void {
     buffers = objc.send(Id, objc.alloc("NSMutableDictionary"), "init", .{});
 }
 
-/// Whether an image source is one that this module can fetch.
-pub fn is_remote(source: []const u8) bool {
-    const scheme = "https://";
-    return source.len > scheme.len and std.ascii.startsWithIgnoreCase(source, scheme);
+pub const Lookup = union(enum) {
+    image: Id,
+    /// The address that has no image: the source, or the end of its redirects.
+    missing: Id,
+};
+
+/// The fetched image of a fetchable address, or the address that the user must approve first.
+pub fn lookup(source: Id) Lookup {
+    var current = source;
+    for (0..redirects_max) |_| {
+        const found = objc.send(?Id, states, "objectForKey:", .{current}) orelse break;
+        if (objc.send(bool, found, "isKindOfClass:", .{objc.class("NSImage")})) {
+            return .{ .image = found };
+        }
+        if (!objc.send(bool, found, "isKindOfClass:", .{objc.class("NSString")})) break;
+        current = found;
+    }
+    return .{ .missing = current };
 }
 
-/// The fetched image of a URL, or null when there is none (yet).
-pub fn image(source: Id) ?Id {
+fn state_of(source: Id) ?State {
     const found = objc.send(?Id, states, "objectForKey:", .{source}) orelse return null;
-    if (!objc.send(bool, found, "isKindOfClass:", .{objc.class("NSImage")})) return null;
-    return found;
+    if (!objc.send(bool, found, "isKindOfClass:", .{objc.class("NSNumber")})) return null;
+    return @fromBackingInt(@intCast(objc.send(isize, found, "integerValue", .{})));
 }
 
-/// Forgets the URLs that the user declined and the ones that failed, so that the next request
-/// asks about them again.
+fn state_set(source: Id, state: State) void {
+    objc.send(void, states, "setObject:forKey:", .{ cocoa.number(@backingInt(state)), source });
+    assert(objc.send(usize, states, "count", .{}) <= states_max);
+}
+
+/// Forgets the addresses that the user declined and the ones that failed, so that the next
+/// request asks about them again.
 pub fn retry() void {
-    const image_class = objc.class("NSImage");
     const keys = objc.send(Id, states, "allKeys", .{});
     for (0..objc.send(usize, keys, "count", .{})) |index| {
         const key = objc.send(Id, keys, "objectAtIndex:", .{index});
-        const found = objc.send(Id, states, "objectForKey:", .{key});
-        if (objc.send(bool, found, "isKindOfClass:", .{image_class})) continue;
-        const value = objc.send(isize, found, "integerValue", .{});
-        const state: State = @fromBackingInt(@intCast(value));
+        const state = state_of(key) orelse continue;
         if (state != .fetching) objc.send(void, states, "removeObjectForKey:", .{key});
     }
 }
 
-/// Asks the user about the missing remote images of a document (an NSArray of URL strings),
-/// and fetches the ones that are approved. `name` is the NSString that names the document in
-/// the warning. The warning is modal and a render can run inside a callback, so the question
-/// comes after the current event.
+/// Asks the user about the missing remote images of a document (an NSArray of addresses), and
+/// fetches the ones that are approved. `name` is the NSString that names the document in the
+/// warning. The warning is modal and a render can run inside a callback, so the question comes
+/// after the current event.
 pub fn request(sources: Id, name: Id) void {
     if (objc.send(usize, undecided(sources), "count", .{}) == 0) return;
     objc.send(void, delegate, "performSelector:withObject:afterDelay:", .{
@@ -112,11 +137,6 @@ fn undecided(sources: Id) Id {
     return result;
 }
 
-fn state_set(source: Id, state: State) void {
-    objc.send(void, states, "setObject:forKey:", .{ cocoa.number(@backingInt(state)), source });
-    assert(objc.send(usize, states, "count", .{}) <= states_max);
-}
-
 fn ask(_: Id, _: Selector, arguments: Id) callconv(.c) void {
     const name = objc.send(Id, arguments, "objectAtIndex:", .{@as(usize, 0)});
     // An earlier warning can have decided these sources in the meantime.
@@ -130,7 +150,9 @@ fn ask(_: Id, _: Selector, arguments: Id) callconv(.c) void {
     }
 }
 
-/// Shows the warning with the list of addresses. Returns whether the user approved them.
+/// Shows the warning with the list of addresses. Returns whether the user approved them. No
+/// key approves: Return does nothing and Escape declines, because the warning can come up
+/// while the user types in another window.
 fn warning_run(name: Id, sources: Id) bool {
     const count = objc.send(usize, sources, "count", .{});
     assert(count > 0);
@@ -152,30 +174,36 @@ fn warning_run(name: Id, sources: Id) bool {
             "Nothing is loaded unless you approve these addresses.",
     )});
     objc.send(void, alert, "setAccessoryView:", .{sources_view(sources)});
-    _ = objc.send(Id, alert, "addButtonWithTitle:", .{cocoa.string("Load Images")});
+    const approve = objc.send(Id, alert, "addButtonWithTitle:", .{cocoa.string("Load Images")});
+    objc.send(void, approve, "setKeyEquivalent:", .{cocoa.string("")});
     const decline = objc.send(Id, alert, "addButtonWithTitle:", .{cocoa.string("Don’t Load")});
     objc.send(void, decline, "setKeyEquivalent:", .{cocoa.string("\x1b")});
     const response_first_button: isize = 1000;
     return objc.send(isize, alert, "runModal", .{}) == response_first_button;
 }
 
-/// A scrolling list of the addresses, one per line. Long addresses wrap, so that each one can
-/// be read in full.
+/// A scrolling list of the addresses, with an empty line between them. Long addresses wrap,
+/// and the scroller always shows, so that the user can see that there is more to read.
 fn sources_view(sources: Id) Id {
     const width = 460;
     const line_height = 17;
     const lines_max = 12;
+    const dimension_max = 1.0e7;
     const count = objc.send(usize, sources, "count", .{});
-    // Room for two lines per address, because most addresses wrap once.
-    const lines: f64 = @floatFromInt(@min(count * 2, lines_max));
-    const height = lines * line_height + 8;
-    const frame = cocoa.Rect.init(0, 0, width, height);
+    // Room for two lines per address, because most addresses wrap once, and the empty line.
+    const lines: f64 = @floatFromInt(@min(count * 3, lines_max));
+    const frame = cocoa.Rect.init(0, 0, width, lines * line_height + 8);
     const text_view = objc.autorelease(
         objc.send(Id, objc.alloc("NSTextView"), "initWithFrame:", .{frame}),
     );
     const autoresizing_width: usize = 2;
     objc.send(void, text_view, "setEditable:", .{false});
+    objc.send(void, text_view, "setVerticallyResizable:", .{true});
+    objc.send(void, text_view, "setHorizontallyResizable:", .{false});
     objc.send(void, text_view, "setAutoresizingMask:", .{autoresizing_width});
+    objc.send(void, text_view, "setMaxSize:", .{
+        cocoa.Size{ .width = dimension_max, .height = dimension_max },
+    });
     objc.send(void, text_view, "setFont:", .{objc.send(
         Id,
         objc.class("NSFont"),
@@ -184,21 +212,23 @@ fn sources_view(sources: Id) Id {
     )});
     objc.send(void, text_view, "setTextContainerInset:", .{cocoa.Size{ .width = 2, .height = 4 }});
     objc.send(void, text_view, "setString:", .{
-        objc.send(Id, sources, "componentsJoinedByString:", .{cocoa.string("\n")}),
+        objc.send(Id, sources, "componentsJoinedByString:", .{cocoa.string("\n\n")}),
     });
 
     const scroll_view = objc.autorelease(
         objc.send(Id, objc.alloc("NSScrollView"), "initWithFrame:", .{frame}),
     );
     const border_bezel: usize = 2;
+    const scroller_style_legacy: isize = 0;
     objc.send(void, scroll_view, "setBorderType:", .{border_bezel});
     objc.send(void, scroll_view, "setHasVerticalScroller:", .{true});
-    objc.send(void, scroll_view, "setAutohidesScrollers:", .{true});
+    objc.send(void, scroll_view, "setScrollerStyle:", .{scroller_style_legacy});
     objc.send(void, scroll_view, "setDocumentView:", .{text_view});
     return scroll_view;
 }
 
 fn fetch(source: Id) void {
+    assert(address.fetchable(cocoa.string_bytes(source)));
     const url = objc.send(?Id, objc.class("NSURL"), "URLWithString:", .{source}) orelse {
         return state_set(source, .failed);
     };
@@ -210,7 +240,8 @@ fn fetch(source: Id) void {
     objc.send(void, task, "resume", .{});
 }
 
-/// The session keeps nothing on disk: no cache, no cookies. Its delegate runs on the main
+/// The session keeps nothing: no cache, no cookies and no credentials, on disk or in memory.
+/// Two images from one server cannot be linked through it. Its delegate runs on the main
 /// thread.
 fn session_create() Id {
     const configuration = objc.send(
@@ -225,6 +256,10 @@ fn session_create() Id {
     objc.send(void, configuration, "setTimeoutIntervalForResource:", .{
         @as(f64, resource_timeout_seconds),
     });
+    objc.send(void, configuration, "setHTTPShouldSetCookies:", .{false});
+    objc.send(void, configuration, "setHTTPCookieStorage:", .{@as(?Id, null)});
+    objc.send(void, configuration, "setURLCredentialStorage:", .{@as(?Id, null)});
+    objc.send(void, configuration, "setURLCache:", .{@as(?Id, null)});
     const queue = objc.send(Id, objc.class("NSOperationQueue"), "mainQueue", .{});
     return objc.retain(objc.send(
         Id,
@@ -248,15 +283,47 @@ fn task_received(_: Id, _: Selector, _: Id, task: Id, data: Id) callconv(.c) voi
     }
 }
 
+/// The start of an Objective-C block, which is how the session passes its completion handler.
+const RedirectHandler = extern struct {
+    isa: ?*anyopaque,
+    flags: c_int,
+    reserved: c_int,
+    invoke: *const fn (*RedirectHandler, ?Id) callconv(.c) void,
+};
+
+/// The user approved one address, not the address that its server redirects to. The redirect
+/// is not followed. The new address is kept, and the next render asks the user about it.
+fn task_redirected(
+    _: Id,
+    _: Selector,
+    _: Id,
+    task: Id,
+    _: Id,
+    redirect: Id,
+    handler: *RedirectHandler,
+) callconv(.c) void {
+    handler.invoke(handler, null);
+    const source = objc.send(?Id, task, "taskDescription", .{}) orelse return;
+    if (state_of(source) != .fetching) return;
+    const url = objc.send(?Id, redirect, "URL", .{}) orelse return;
+    const target = objc.send(?Id, url, "absoluteString", .{}) orelse return;
+    if (!address.fetchable(cocoa.string_bytes(target))) return;
+    objc.send(void, states, "setObject:forKey:", .{ target, source });
+}
+
 fn task_completed(_: Id, _: Selector, _: Id, task: Id, failure: ?Id) callconv(.c) void {
     const key = task_key(task);
     const source = objc.send(?Id, task, "taskDescription", .{}) orelse return;
     const buffer = objc.send(?Id, buffers, "objectForKey:", .{key}) orelse return;
-    const decoded = if (failure == null) image_decode(buffer) else null;
-    if (decoded) |loaded| {
-        objc.send(void, states, "setObject:forKey:", .{ loaded, source });
-    } else {
-        state_set(source, .failed);
+    // A redirect has already replaced the state.
+    if (state_of(source) == .fetching) {
+        const succeeded = failure == null and task_succeeded(task);
+        const decoded = if (succeeded) image_decode(buffer) else null;
+        if (decoded) |loaded| {
+            objc.send(void, states, "setObject:forKey:", .{ loaded, source });
+        } else {
+            state_set(source, .failed);
+        }
     }
     objc.send(void, buffers, "removeObjectForKey:", .{key});
 
@@ -274,12 +341,31 @@ fn task_completed(_: Id, _: Selector, _: Id, task: Id, failure: ?Id) callconv(.c
     });
 }
 
+/// Whether the server answered with the image, and not with an error page.
+fn task_succeeded(task: Id) bool {
+    const response = objc.send(?Id, task, "response", .{}) orelse return false;
+    const http = objc.class("NSHTTPURLResponse");
+    if (!objc.send(bool, response, "isKindOfClass:", .{http})) return false;
+    const status = objc.send(isize, response, "statusCode", .{});
+    return status >= 200 and status < 300;
+}
+
 fn image_decode(data: Id) ?Id {
     const allocated = objc.alloc("NSImage");
     const loaded = objc.send(?Id, allocated, "initWithData:", .{data}) orelse return null;
     const decoded = objc.autorelease(loaded);
     const size = objc.send(cocoa.Size, decoded, "size", .{});
     if (!(size.width >= 1 and size.height >= 1)) return null;
+    const representations = objc.send(Id, decoded, "representations", .{});
+    for (0..objc.send(usize, representations, "count", .{})) |index| {
+        const representation = objc.send(Id, representations, "objectAtIndex:", .{index});
+        // A vector representation has no pixels, and gives zero here.
+        const wide = objc.send(isize, representation, "pixelsWide", .{});
+        const high = objc.send(isize, representation, "pixelsHigh", .{});
+        if (wide < 0 or high < 0) return null;
+        if (wide > image_pixels_max or high > image_pixels_max) return null;
+        if (wide * high > image_pixels_max) return null;
+    }
     return decoded;
 }
 
