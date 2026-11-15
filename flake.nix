@@ -21,6 +21,8 @@
           version = "0.0.0";
           src = self;
           nativeBuildInputs = [ pkgs.zig.hook ];
+          # AppKit enables Liquid Glass only for binaries linked against the macOS 26 SDK or newer.
+          buildInputs = [ pkgs.apple-sdk_27 ];
           meta.mainProgram = "minied";
         };
         default = minied;
@@ -32,6 +34,8 @@
             pkgs.zig
             pkgs.zls
           ];
+          # AppKit enables Liquid Glass only for binaries linked against the macOS 26 SDK or newer.
+          buildInputs = [ pkgs.apple-sdk_27 ];
         };
       });
 
