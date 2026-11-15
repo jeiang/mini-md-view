@@ -40,13 +40,15 @@ gives the Liquid Glass design only to such binaries. The flake provides that SDK
   Finder and does not open it, so a document cannot run a script with one click.
 - Back and Forward (Go menu, Command-[ and Command-], or the toolbar) return to the files and
   scroll positions that a window showed. Each window keeps its last 32 steps.
+- Loads an image from the network only after you approve it. A document with `https` images
+  shows a warning that lists each address in full. The decision lasts until the viewer quits,
+  and View > Load Remote Images asks again. Images over plain `http` are not loaded.
 
 Markdown: CommonMark blocks and inlines, plus GFM tables, task lists, strikethrough, autolinks,
 alerts and footnotes, and YAML front matter. Of raw HTML, comments are hidden, `<br>`,
 `<img>` (with `width` and `height`) and `<a href>` work, and the tags `p`, `div`, `span`,
 `center` and `picture` are dropped but keep their content. Other HTML is shown as text.
-Images load from local files only: mini-md-view never uses the
-network.
+Images load from local files, and from `https` addresses that you approve.
 
 Mermaid: `flowchart`/`graph`, `sequenceDiagram`, `stateDiagram`, `classDiagram`, `erDiagram`,
 `pie` and `gantt`. A diagram that cannot be laid out is shown as its source, with the reason.
